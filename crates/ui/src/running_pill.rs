@@ -3,15 +3,31 @@
 //! indicator) and the Subagents header, and the pulsing button with a count
 //! badge on the titlebar's explorer toggle.
 
-use gpui::{AnyElement, SharedString, Styled as _, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, Render,
+    RenderOnce, SharedString, Styled as _, TextAlign, TextRun, Window, canvas, div, fill, point,
+    prelude::*, px, size,
+};
 
 use crate::loaders;
+use crate::motion::{self, ZERON_PULSE};
 use crate::theme::Theme;
 
 /// Pill height. The sidebar's status slot is 13px and its rows 29px; 16px
 /// matches the sidebar's pull-request badge so the two never disagree.
 const HEIGHT: f32 = 16.0;
 const DOT: f32 = 5.0;
+/// Pill padding either side of the content, and the gap between dot and digits.
+const PAD: f32 = 6.0;
+const GAP: f32 = 4.0;
+/// A capped label ends in "+", whose thin arms leave the eye a wider gap
+/// than the same padding after a digit; the padding after it is trimmed by
+/// this much so the two ends look balanced.
+const PLUS_TRIM: f32 = 1.0;
+/// Where the middle of Geist Mono's digits sits above the baseline, as a
+/// fraction of the font size: (726 + -16) / 2 units of 1000 for the round
+/// digits, 710 / 2 for the flat ones.
+const DIGIT_MID: f32 = 0.355;
 /// Height of the count badge on the titlebar button.
 const BADGE: f32 = 13.0;
 /// Corner radius of the titlebar's icon buttons.
@@ -28,6 +44,10 @@ pub fn count_label(count: u32) -> SharedString {
     }
 }
 
+fn is_capped(count: u32) -> bool {
+    count > COUNT_CAP
+}
+
 /// The count's digits in a box exactly `height` tall. With the line height set
 /// to the box height, gpui centres the line's ascent-plus-descent in the box,
 /// and Geist Mono's metrics put the middle of its digits on that centre (about
@@ -39,7 +59,7 @@ fn count_text(
     size: f32,
     height: f32,
     weight: gpui::FontWeight,
-    color: gpui::Hsla,
+    color: Hsla,
     theme: &Theme,
 ) -> gpui::Div {
     div()
@@ -56,29 +76,167 @@ fn count_text(
 }
 
 /// The pill for `count` running subagents; callers draw nothing at zero.
-/// `key` scopes the dot's animation state — one per placement.
+/// `key` scopes the pulse's animation state — one per placement.
 pub fn running_pill(key: impl Into<SharedString>, count: u32, theme: &Theme) -> AnyElement {
-    let tone = theme.busy;
-    div()
-        .h(px(HEIGHT))
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(6.0))
-        .rounded(px(HEIGHT / 2.0))
-        .bg(tone.opacity(0.16))
-        .child(loaders::pulse_dot(key, DOT, tone))
-        .child(count_text(
-            count,
-            10.0,
-            HEIGHT,
-            gpui::FontWeight::MEDIUM,
-            tone,
-            theme,
-        ))
-        .into_any_element()
+    RunningPill {
+        key: key.into(),
+        count,
+        tone: theme.busy,
+        family: theme.font_mono.clone(),
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct RunningPill {
+    key: SharedString,
+    count: u32,
+    tone: Hsla,
+    family: SharedString,
+}
+
+impl RenderOnce for RunningPill {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let spec = PillSpec {
+            count: self.count,
+            tone: self.tone,
+            family: self.family,
+        };
+        // The pill's width follows its label, and a cached view needs that up
+        // front; shaping is cached by the text system.
+        let font_size = pill_font_size(window);
+        let width = spec.shape(window, font_size).width;
+        let total = px(PAD + DOT + GAP + spec.right_pad()) + width;
+        // Own the pulse in a cached view so the surrounding list stays still.
+        let view = window.with_global_id(self.key.into(), |id, window| {
+            window.with_element_state(id, |previous: Option<Entity<PillView>>, _| {
+                let view = previous.unwrap_or_else(|| cx.new(|_| PillView { spec: spec.clone() }));
+                view.update(cx, |view, cx| {
+                    if view.spec != spec {
+                        view.spec = spec.clone();
+                        cx.notify();
+                    }
+                });
+                (view.clone(), view)
+            })
+        });
+        view.cached(
+            gpui::StyleRefinement::default()
+                .w(total)
+                .h(px(HEIGHT))
+                .flex_none(),
+        )
+    }
+}
+
+fn pill_font_size(window: &Window) -> gpui::Pixels {
+    crate::typography::ui_rems(10.0).to_pixels(window.rem_size())
+}
+
+#[derive(Clone, PartialEq)]
+struct PillSpec {
+    count: u32,
+    tone: Hsla,
+    family: SharedString,
+}
+
+impl PillSpec {
+    fn right_pad(&self) -> f32 {
+        if is_capped(self.count) {
+            PAD - PLUS_TRIM
+        } else {
+            PAD
+        }
+    }
+
+    fn shape(&self, window: &Window, font_size: gpui::Pixels) -> gpui::ShapedLine {
+        let label = count_label(self.count);
+        let run = TextRun {
+            len: label.len(),
+            font: gpui::Font {
+                family: self.family.clone(),
+                features: gpui::FontFeatures::default(),
+                fallbacks: None,
+                weight: gpui::FontWeight::MEDIUM,
+                style: gpui::FontStyle::Normal,
+            },
+            color: self.tone,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(label, font_size, &[run], None)
+    }
+}
+
+struct PillView {
+    spec: PillSpec,
+}
+
+impl Render for PillView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let spec = self.spec.clone();
+        let font_size = pill_font_size(window);
+        let line = spec.shape(window, font_size);
+        let delta = motion::pulse_delta_slow(&ZERON_PULSE, cx.entity_id(), cx);
+        let wave = motion::lerp(0.4, 1.0, (motion::pulse_opacity(delta) - 0.08) / 0.92);
+        canvas(
+            |_, _, _| (),
+            move |bounds: Bounds<gpui::Pixels>, _, window, cx| {
+                paint_pill(bounds, &spec, &line, font_size, wave, window, cx);
+            },
+        )
+        .size_full()
+    }
+}
+
+/// Paint the pill: background, dot, digits. Everything hangs off the digits'
+/// own baseline so the dot and the digits can never drift apart. Text
+/// metrics and glyph rounding differ per font size and display scale, so the
+/// baseline is snapped to a device pixel here (as gpui would on painting),
+/// and the dot is centred on the digits' actual middle from that baseline.
+fn paint_pill(
+    bounds: Bounds<gpui::Pixels>,
+    spec: &PillSpec,
+    line: &gpui::ShapedLine,
+    font_size: gpui::Pixels,
+    wave: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let scale = window.scale_factor();
+    let snap = |value: f32| (value * scale).round() / scale;
+    let height = bounds.size.height;
+    window.paint_quad(fill(bounds, spec.tone.opacity(0.16)).corner_radii(height / 2.0));
+
+    // Baseline: the digits' middle on the pill's middle, then onto a device
+    // pixel. `line_top` is where gpui expects the line box so its own
+    // centring of ascent+descent lands the baseline there.
+    let digit_mid = f32::from(font_size) * DIGIT_MID;
+    let baseline = snap(f32::from(bounds.origin.y) + f32::from(height) / 2.0 + digit_mid);
+    let baseline_in_box = (f32::from(height) - f32::from(line.ascent) - f32::from(line.descent))
+        / 2.0
+        + f32::from(line.ascent);
+    let text_origin = point(
+        px(snap(f32::from(bounds.origin.x) + PAD + DOT + GAP)),
+        px(baseline - baseline_in_box),
+    );
+
+    // Dot: whole device pixels, centred on the digits.
+    let diameter = snap(DOT).max(1.0 / scale);
+    let centre_y = baseline - digit_mid;
+    let dot = Bounds::new(
+        point(
+            px(snap(f32::from(bounds.origin.x) + PAD)),
+            px(snap(centre_y - diameter / 2.0)),
+        ),
+        size(px(diameter), px(diameter)),
+    );
+    window.paint_quad(fill(dot, spec.tone.opacity(wave)).corner_radii(px(diameter / 2.0)));
+
+    let _ = line.paint(text_origin, height, TextAlign::Left, None, window, cx);
 }
 
 /// Marks the titlebar's explorer button while subagents run, so they can be
@@ -107,7 +265,13 @@ pub fn mark_files_button(
                 .right(px(-3.0))
                 .h(px(BADGE))
                 .min_w(px(BADGE))
-                .px(px(3.0))
+                .pl(px(3.0))
+                // See [`PLUS_TRIM`].
+                .pr(px(if is_capped(count) {
+                    3.0 - PLUS_TRIM
+                } else {
+                    3.0
+                }))
                 .flex()
                 .items_center()
                 .justify_center()
