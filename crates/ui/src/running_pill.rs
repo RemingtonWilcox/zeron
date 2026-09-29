@@ -48,33 +48,6 @@ fn is_capped(count: u32) -> bool {
     count > COUNT_CAP
 }
 
-/// The count's digits in a box exactly `height` tall. With the line height set
-/// to the box height, gpui centres the line's ascent-plus-descent in the box,
-/// and Geist Mono's metrics put the middle of its digits on that centre (about
-/// 0.00px off at these sizes), and each digit's ink is centred in its advance.
-/// So no manual offsets: whatever is left is device-pixel rounding of the
-/// baseline, at most half a device pixel.
-fn count_text(
-    count: u32,
-    size: f32,
-    height: f32,
-    weight: gpui::FontWeight,
-    color: Hsla,
-    theme: &Theme,
-) -> gpui::Div {
-    div()
-        .h(px(height))
-        .flex_none()
-        .flex()
-        .items_center()
-        .text_size(crate::typography::ui_rems(size))
-        .line_height(px(height))
-        .font_weight(weight)
-        .font_family(theme.font_mono.clone())
-        .text_color(color)
-        .child(count_label(count))
-}
-
 /// The pill for `count` running subagents; callers draw nothing at zero.
 /// `key` scopes the pulse's animation state — one per placement.
 pub fn running_pill(key: impl Into<SharedString>, count: u32, theme: &Theme) -> AnyElement {
@@ -150,25 +123,43 @@ impl PillSpec {
     }
 
     fn shape(&self, window: &Window, font_size: gpui::Pixels) -> gpui::ShapedLine {
-        let label = count_label(self.count);
-        let run = TextRun {
-            len: label.len(),
-            font: gpui::Font {
-                family: self.family.clone(),
-                features: gpui::FontFeatures::default(),
-                fallbacks: None,
-                weight: gpui::FontWeight::MEDIUM,
-                style: gpui::FontStyle::Normal,
-            },
-            color: self.tone,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        window
-            .text_system()
-            .shape_line(label, font_size, &[run], None)
+        shape_count(
+            window,
+            self.count,
+            &self.family,
+            gpui::FontWeight::MEDIUM,
+            self.tone,
+            font_size,
+        )
     }
+}
+
+fn shape_count(
+    window: &Window,
+    count: u32,
+    family: &SharedString,
+    weight: gpui::FontWeight,
+    color: Hsla,
+    font_size: gpui::Pixels,
+) -> gpui::ShapedLine {
+    let label = count_label(count);
+    let run = TextRun {
+        len: label.len(),
+        font: gpui::Font {
+            family: family.clone(),
+            features: gpui::FontFeatures::default(),
+            fallbacks: None,
+            weight,
+            style: gpui::FontStyle::Normal,
+        },
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(label, font_size, &[run], None)
 }
 
 struct PillView {
@@ -197,6 +188,25 @@ impl Render for PillView {
 /// metrics and glyph rounding differ per font size and display scale, so the
 /// baseline is snapped to a device pixel here (as gpui would on painting),
 /// and the dot is centred on the digits' actual middle from that baseline.
+/// Where to put a line of digits so their middle sits on the middle of
+/// `bounds`: the digits' baseline, snapped to a device pixel (as gpui would on
+/// painting), and the top of the line box that lands gpui's own centring of
+/// ascent-plus-descent on that baseline. Returns `(line_top, baseline)`.
+fn digits_baseline(
+    bounds: Bounds<gpui::Pixels>,
+    font_size: gpui::Pixels,
+    line: &gpui::ShapedLine,
+    scale: f32,
+) -> (f32, f32) {
+    let height = f32::from(bounds.size.height);
+    let digit_mid = f32::from(font_size) * DIGIT_MID;
+    let baseline =
+        ((f32::from(bounds.origin.y) + height / 2.0 + digit_mid) * scale).round() / scale;
+    let baseline_in_box =
+        (height - f32::from(line.ascent) - f32::from(line.descent)) / 2.0 + f32::from(line.ascent);
+    (baseline - baseline_in_box, baseline)
+}
+
 fn paint_pill(
     bounds: Bounds<gpui::Pixels>,
     spec: &PillSpec,
@@ -263,29 +273,77 @@ pub fn mark_files_button(
                 .absolute()
                 .top(px(-3.0))
                 .right(px(-3.0))
-                .h(px(BADGE))
-                .min_w(px(BADGE))
-                .pl(px(3.0))
-                // See [`PLUS_TRIM`].
-                .pr(px(if is_capped(count) {
-                    3.0 - PLUS_TRIM
-                } else {
-                    3.0
-                }))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(tone)
-                .child(count_text(
+                .child(CountBadge {
                     count,
-                    9.0,
-                    BADGE,
-                    gpui::FontWeight::SEMIBOLD,
-                    gpui::white(),
-                    theme,
-                )),
+                    tone,
+                    family: theme.font_mono.clone(),
+                }),
         )
+}
+
+/// The count badge on the titlebar button, painted rather than laid out so
+/// the digits can be centred exactly: a laid-out text box lands on a rounded
+/// device pixel, which read as the digit sitting left of centre.
+#[derive(IntoElement)]
+struct CountBadge {
+    count: u32,
+    tone: Hsla,
+    family: SharedString,
+}
+
+/// Padding either side of the badge's digits.
+const BADGE_PAD: f32 = 3.0;
+
+impl RenderOnce for CountBadge {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let font_size = crate::typography::ui_rems(9.0).to_pixels(window.rem_size());
+        let line = shape_count(
+            window,
+            self.count,
+            &self.family,
+            gpui::FontWeight::SEMIBOLD,
+            gpui::white(),
+            font_size,
+        );
+        let capped = is_capped(self.count);
+        let text_width = f32::from(line.width);
+        // Capped labels trim the padding after the "+" (see [`PLUS_TRIM`]).
+        let right_pad = if capped {
+            BADGE_PAD - PLUS_TRIM
+        } else {
+            BADGE_PAD
+        };
+        let width = (BADGE_PAD + text_width + right_pad).max(BADGE);
+        let tone = self.tone;
+        canvas(
+            |_, _, _| (),
+            move |bounds: Bounds<gpui::Pixels>, _, window, cx| {
+                let scale = window.scale_factor();
+                let snap = |value: f32| (value * scale).round() / scale;
+                window.paint_quad(fill(bounds, tone).corner_radii(bounds.size.height / 2.0));
+                let (line_top, _) = digits_baseline(bounds, font_size, &line, scale);
+                // Single digits sit centred in the badge; a capped label sits
+                // at the padding, its trimmed side toward the "+".
+                let left = f32::from(bounds.origin.x);
+                let x = if capped {
+                    left + BADGE_PAD
+                } else {
+                    left + (f32::from(bounds.size.width) - text_width) / 2.0
+                };
+                let origin = point(px(snap(x)), px(line_top));
+                let _ = line.paint(
+                    origin,
+                    bounds.size.height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            },
+        )
+        .w(px(width))
+        .h(px(BADGE))
+    }
 }
 
 #[cfg(test)]
