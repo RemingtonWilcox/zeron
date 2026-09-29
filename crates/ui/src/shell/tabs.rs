@@ -497,23 +497,13 @@ impl Shell {
                                 .when(self.files_panel_open(cx), |button| {
                                     button.bg(crate::theme::wash(0.09))
                                 })
-                                // Running subagents live in this panel: badge
-                                // the button so they are findable while it is
-                                // closed.
+                                // Running subagents live in this panel: mark the
+                                // button so they are findable while it is closed.
                                 .when(running_subagents > 0, |button| {
-                                    button.relative().child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .bottom(px(-8.0))
-                                            .flex()
-                                            .justify_center()
-                                            .child(crate::running_pill::running_pill(
-                                                "toggle-files-panel-subagents",
-                                                running_subagents,
-                                                &theme,
-                                            )),
+                                    crate::running_pill::mark_files_button(
+                                        button,
+                                        running_subagents,
+                                        &theme,
                                     )
                                 }),
                             )

@@ -3,7 +3,7 @@
 //! explorer button, and the explorer's Subagents header, so the number reads
 //! the same wherever it turns up.
 
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, SharedString, Styled as _, div, prelude::*, px};
 
 use crate::loaders;
 use crate::theme::Theme;
@@ -12,6 +12,8 @@ use crate::theme::Theme;
 /// matches the sidebar's pull-request badge so the two never disagree.
 const HEIGHT: f32 = 16.0;
 const DOT: f32 = 5.0;
+/// Corner radius of the titlebar's icon buttons.
+const BUTTON_RADIUS: f32 = 6.0;
 /// Past this the count would outgrow the pill; it reads "99+".
 const COUNT_CAP: u32 = 99;
 
@@ -61,4 +63,43 @@ mod tests {
         assert_eq!(count_label(99).as_ref(), "99");
         assert_eq!(count_label(100).as_ref(), "99+");
     }
+}
+
+/// Marks the titlebar's explorer button while subagents run, so they can be
+/// found with the panel closed: the button's face breathes in the activity
+/// tone, and a small count badge sits on its corner. Both are drawn over the
+/// button, so it keeps its size and position among the titlebar controls.
+pub fn mark_files_button(
+    button: gpui::Stateful<gpui::Div>,
+    count: u32,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let tone = theme.busy;
+    button
+        .relative()
+        .child(div().absolute().inset_0().child(loaders::pulse_glow(
+            "files-button-glow",
+            BUTTON_RADIUS,
+            tone,
+            0.10,
+            0.30,
+        )))
+        .child(
+            div()
+                .absolute()
+                .top(px(-3.0))
+                .right(px(-3.0))
+                .min_w(px(13.0))
+                .h(px(13.0))
+                .px(px(3.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(tone)
+                .text_size(crate::typography::ui_rems(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child(count_label(count)),
+        )
 }
