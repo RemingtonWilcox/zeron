@@ -28,18 +28,16 @@ pub fn count_label(count: u32) -> SharedString {
     }
 }
 
-/// The count's digits in a box exactly `height` tall, so the line box, the
-/// container and the glyphs share one centre. Digits sit a touch off the
-/// centre of a text line (font ascent and descent are not symmetric about the
-/// cap height), so `nudge` lifts the text by that optical remainder, and
-/// `shift` moves it right for the same reason horizontally (a digit's ink is
-/// a little left of the middle of its advance).
+/// The count's digits in a box exactly `height` tall. With the line height set
+/// to the box height, gpui centres the line's ascent-plus-descent in the box,
+/// and Geist Mono's metrics put the middle of its digits on that centre (about
+/// 0.00px off at these sizes), and each digit's ink is centred in its advance.
+/// So no manual offsets: whatever is left is device-pixel rounding of the
+/// baseline, at most half a device pixel.
 fn count_text(
     count: u32,
     size: f32,
     height: f32,
-    nudge: f32,
-    shift: f32,
     weight: gpui::FontWeight,
     color: gpui::Hsla,
     theme: &Theme,
@@ -54,9 +52,6 @@ fn count_text(
         .font_weight(weight)
         .font_family(theme.font_mono.clone())
         .text_color(color)
-        .relative()
-        .top(px(-nudge))
-        .left(px(shift))
         .child(count_label(count))
 }
 
@@ -79,24 +74,12 @@ pub fn running_pill(key: impl Into<SharedString>, count: u32, theme: &Theme) -> 
             count,
             10.0,
             HEIGHT,
-            PILL_NUDGE,
-            0.0,
             gpui::FontWeight::MEDIUM,
             tone,
             theme,
         ))
         .into_any_element()
 }
-
-/// Optical lift of the digits, in px (see [`count_text`]). Measured on
-/// rendered captures: without it the digits sit about half a device pixel low
-/// in the pill and a full one high in the badge (which had no line height);
-/// 0.25 centres both to within half a device pixel, the most a 13px box and
-/// 6-7px-tall digits allow at fractional display scales.
-const PILL_NUDGE: f32 = 0.25;
-const BADGE_NUDGE: f32 = 0.25;
-/// Rightward optical shift of the badge's digits, in px.
-const BADGE_SHIFT: f32 = 0.4;
 
 /// Marks the titlebar's explorer button while subagents run, so they can be
 /// found with the panel closed: the button's face breathes in the activity
@@ -134,8 +117,6 @@ pub fn mark_files_button(
                     count,
                     9.0,
                     BADGE,
-                    BADGE_NUDGE,
-                    BADGE_SHIFT,
                     gpui::FontWeight::SEMIBOLD,
                     gpui::white(),
                     theme,
