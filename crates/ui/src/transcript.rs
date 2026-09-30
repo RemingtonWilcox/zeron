@@ -1284,6 +1284,30 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// turn — tool calls, thoughts, and the narration text between them — folds
 /// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
 /// trailing run of text parts) stays a visible row.
+/// A user entry's text as sent, attachment refs included.
+fn user_raw_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// What a Retry resends: the latest prompt as sent, attachment refs
+/// included, so its files ride along again.
+fn retry_prompt(entries: &[SessionMessageEntry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User)
+        .map(user_raw_text)
+        .filter(|text| !text.trim().is_empty())
+}
+
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
@@ -1298,15 +1322,7 @@ pub fn rows_for_entry(
     let entry_id: SharedString = entry.id.clone().into();
 
     if entry.role == MessageRole::User {
-        let raw: String = entry
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let raw = user_raw_text(entry);
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
@@ -3305,6 +3321,8 @@ pub enum TranscriptEvent {
         harness: HarnessId,
         device_id: String,
     },
+    /// A failed turn's "Retry": send `text`, the prompt behind it, again.
+    Resend { chat_id: String, text: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6259,6 +6277,43 @@ impl Transcript {
         )
     }
 
+    /// The Retry for the error that ended the chat's latest turn: only on
+    /// the transcript's last row, only once nothing runs, and only in the
+    /// chat's own transcript (a subagent tab has no prompt to resend).
+    fn retry_remedy(
+        &self,
+        row_id: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.doc_override.is_some() || self.rows.last().map(|r| &r.id) != Some(row_id) {
+            return None;
+        }
+        let chat_id = self.chat_id.clone()?;
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let busy = matches!(
+            state.indicator_for(&chat_id, now),
+            crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+        );
+        if busy || state.send_pending(&chat_id, now) {
+            return None;
+        }
+        let text = retry_prompt(&state.transcript)?;
+        let key = SharedString::from(format!("{row_id}-retry"));
+        Some(
+            crate::popover::btn_ghost(theme, "Retry", key.clone())
+                .id(key)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(TranscriptEvent::Resend {
+                        chat_id: chat_id.clone(),
+                        text: text.clone(),
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
@@ -6671,11 +6726,13 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message, cause } => {
-                let remedy = match cause {
+                let sign_in = match cause {
                     Some(ErrorCause::SignedOut) => self.sign_in_remedy(&row.id, &theme, cx),
                     _ => None,
                 };
-                error_chip(message.clone(), remedy, &theme)
+                let retry = self.retry_remedy(&row.id, &theme, cx);
+                let actions: Vec<AnyElement> = sign_in.into_iter().chain(retry).collect();
+                error_chip(message.clone(), actions, &theme)
             }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
         };
@@ -7876,7 +7933,7 @@ fn user_bubble_text(
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, remedy: Option<AnyElement>, theme: &Theme) -> AnyElement {
+fn error_chip(message: SharedString, actions: Vec<AnyElement>, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
         .w_full()
@@ -7884,8 +7941,8 @@ fn error_chip(message: SharedString, remedy: Option<AnyElement>, theme: &Theme) 
             notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
                 .w_full()
-                .when_some(remedy, |chip, remedy| {
-                    chip.child(div().flex().child(remedy))
+                .when(!actions.is_empty(), |chip| {
+                    chip.child(div().flex().gap(px(4.0)).children(actions))
                 }),
         )
         .into_any_element()
@@ -11106,6 +11163,37 @@ mod tests {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
+    }
+
+    #[test]
+    fn retry_resends_the_latest_prompt_with_its_attachments() {
+        let user = |id: &str, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: vec![text_part("t0", text)],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let failed = || {
+            assistant(
+                "a",
+                MessageStatus::Complete,
+                vec![MessagePart::Error {
+                    id: "e0".into(),
+                    message: "Claude is overloaded right now".into(),
+                    cause: None,
+                }],
+            )
+        };
+        // The refs ride the text as sent, so the files go along again.
+        let sent = crate::attachments::with_attachments("look at this", &["/up/a.png".into()]);
+        let entries = [user("u0", "earlier"), failed(), user("u1", &sent), failed()];
+        assert_eq!(retry_prompt(&entries).as_deref(), Some(sent.as_str()));
+        assert_eq!(retry_prompt(&[failed()]), None, "nothing to resend");
+        assert_eq!(retry_prompt(&[user("u0", "  "), failed()]), None);
     }
 
     #[test]

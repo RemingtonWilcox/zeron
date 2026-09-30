@@ -3808,6 +3808,14 @@ impl Shell {
             } => {
                 self.sign_in_again(chat_id.clone(), *harness, device_id, cx);
             }
+            TranscriptEvent::Resend { chat_id, text } => {
+                // The composer sends for the selected chat: only resend there.
+                if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
+                    let text = text.clone();
+                    self.composer
+                        .update(cx, |composer, cx| composer.resend(text, cx));
+                }
+            }
         }
     }
 
