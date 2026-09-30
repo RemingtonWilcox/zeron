@@ -34,6 +34,7 @@
 pub mod catalog;
 mod discovery;
 mod normalize;
+mod refresh_gate;
 mod wire;
 
 use std::path::PathBuf;
@@ -74,6 +75,14 @@ fn resolve_claude_executable() -> Option<PathBuf> {
     extra.push(PathBuf::from("/opt/homebrew/bin/claude"));
     extra.push(PathBuf::from("/usr/local/bin/claude"));
     crate::executable::find_on_paths("claude", extra)
+}
+
+/// Claude Code's config dir: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn config_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"))
 }
 
 /// The inline `--mcp-config` JSON for an injected server (the CLI accepts a
@@ -285,7 +294,9 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        // Held for the probe's life: it asks for no model output, so it
+        // hands any turn on when it exits.
+        let (mut child, _refresh_turn) = refresh_gate::spawn(&mut cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
@@ -544,7 +555,7 @@ impl ClaudeHarness {
             // config with settings-sourced ones.
             cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
         }
-        let mut child = cmd.spawn().map_err(|e| {
+        let (mut child, refresh_turn) = refresh_gate::spawn(&mut cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
@@ -600,6 +611,7 @@ impl ClaudeHarness {
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
+            refresh_turn,
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -725,6 +737,8 @@ struct Session {
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    /// Held until the run reaches the API or ends; see [`refresh_gate`].
+    refresh_turn: Option<refresh_gate::Turn>,
 }
 
 /// The per-run event loop: one task multiplexing stdout frames, the steering
@@ -741,6 +755,7 @@ async fn run_session(session: Session) {
         interrupt_grace,
         kill_grace,
         stderr_tail,
+        mut refresh_turn,
     } = session;
     let RunControls {
         execution_lease: _execution_lease,
@@ -789,6 +804,12 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    // Model output: the run has authenticated.
+                    if matches!(frame, Frame::StreamEvent(_) | Frame::Assistant(_))
+                        && let Some(turn) = refresh_turn.take()
+                    {
+                        turn.authenticated();
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         if title_only {
                             let line = control_response_line(&req.request_id, serde_json::json!({
