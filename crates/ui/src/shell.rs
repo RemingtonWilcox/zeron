@@ -3795,7 +3795,25 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::SignIn { harness, device_id } => {
+                self.sign_in_again(*harness, device_id, cx);
+            }
         }
+    }
+
+    /// A signed-out error chip's remedy: Settings → Accounts, aimed at the
+    /// chat's host device (CLI logins are per device), starts the sign-in.
+    fn sign_in_again(
+        &mut self,
+        harness: zeron_proto::HarnessId,
+        device_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(SettingsSection::Agents, cx);
+        let local = self.state.read(cx).local_device_id.clone();
+        let target = (local.as_deref() != Some(device_id)).then(|| device_id.to_string());
+        self.ensure_accounts_page(cx)
+            .update(cx, |page, cx| page.sign_in(harness, target, cx));
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -4516,6 +4534,13 @@ impl Shell {
         cx.notify();
     }
 
+    fn ensure_accounts_page(&mut self, cx: &mut Context<Self>) -> Entity<AccountsPage> {
+        let state = self.state.clone();
+        self.accounts_page
+            .get_or_insert_with(|| cx.new(|cx| AccountsPage::new(state, cx)))
+            .clone()
+    }
+
     fn ensure_appearance_page(&mut self, cx: &mut Context<Self>) {
         if self.appearance_page.is_none() {
             let page = cx.new(AppearancePage::new);
@@ -4707,16 +4732,7 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Agents => {
-                if self.accounts_page.is_none() {
-                    let state = self.state.clone();
-                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
-                }
-                match &self.accounts_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
+            SettingsSection::Agents => self.ensure_accounts_page(cx).into_any_element(),
             SettingsSection::Appearance => {
                 self.ensure_appearance_page(cx);
                 match &self.appearance_page {

@@ -580,6 +580,21 @@ impl AccountsPage {
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
+    /// Sign `harness` in on `target` (`None` = this device): a signed-out
+    /// error chip's "Sign in again". Agents with several logins (one per
+    /// provider) leave the pick to the page.
+    pub(crate) fn sign_in(
+        &mut self,
+        harness: HarnessId,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_target_device(target, cx);
+        if let [only] = login_options(harness).as_slice() {
+            self.start_login(harness, only.provider, cx);
+        }
+    }
+
     pub(crate) fn set_embedded_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if self.embedded_harness != Some(harness) {
             self.embedded_harness = Some(harness);
@@ -2406,6 +2421,19 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(live, ["gpt-b", "copilot", "grok-a"]);
+    }
+
+    #[gpui::test]
+    fn sign_in_aims_the_page_at_the_chats_device(cx: &mut gpui::TestAppContext) {
+        let page = page(cx);
+        page.update(cx, |page, _, cx| {
+            page.sign_in(HarnessId::ClaudeCode, Some("remote".into()), cx);
+            assert_eq!(page.target_device.as_deref(), Some("remote"));
+            // Back on this device: the passthrough clears.
+            page.sign_in(HarnessId::ClaudeCode, None, cx);
+            assert_eq!(page.target_device, None);
+        })
+        .unwrap();
     }
 
     fn page(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<AccountsPage> {
