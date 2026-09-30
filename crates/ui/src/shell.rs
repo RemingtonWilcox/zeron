@@ -35,7 +35,7 @@ use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB_SLIDE};
 use crate::popover::{self, Loadable};
 use crate::rail;
-use crate::settings::accounts::AccountsPage;
+use crate::settings::accounts::{AccountsEvent, AccountsPage};
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
@@ -1853,6 +1853,10 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    harnesses_sub: Option<Subscription>,
+    /// The chat an error chip's "Sign in again" left, and for which agent:
+    /// the sign-in finishing returns there.
+    sign_in_return: Option<(zeron_proto::HarnessId, String)>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2299,6 +2303,8 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            harnesses_sub: None,
+            sign_in_return: None,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -3795,25 +3801,50 @@ impl Shell {
                     cx,
                 );
             }
-            TranscriptEvent::SignIn { harness, device_id } => {
-                self.sign_in_again(*harness, device_id, cx);
+            TranscriptEvent::SignIn {
+                chat_id,
+                harness,
+                device_id,
+            } => {
+                self.sign_in_again(chat_id.clone(), *harness, device_id, cx);
             }
         }
     }
 
-    /// A signed-out error chip's remedy: Settings → Accounts, aimed at the
-    /// chat's host device (CLI logins are per device), starts the sign-in.
+    /// A signed-out error chip's remedy: the agent's Providers details, aimed
+    /// at the chat's host device (CLI logins are per device), start its
+    /// sign-in; finishing it returns to the chat.
     fn sign_in_again(
         &mut self,
+        chat_id: String,
         harness: zeron_proto::HarnessId,
         device_id: &str,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings(SettingsSection::Agents, cx);
+        self.open_settings(SettingsSection::Harnesses, cx);
         let local = self.state.read(cx).local_device_id.clone();
         let target = (local.as_deref() != Some(device_id)).then(|| device_id.to_string());
-        self.ensure_accounts_page(cx)
+        self.sign_in_return = Some((harness, chat_id));
+        self.ensure_harnesses_page(cx)
             .update(cx, |page, cx| page.sign_in(harness, target, cx));
+    }
+
+    /// Back to the chat whose "Sign in again" started this sign-in, if the
+    /// user is still in Settings waiting on it.
+    fn on_signed_in(
+        &mut self,
+        _: Entity<HarnessesPage>,
+        event: &AccountsEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let AccountsEvent::SignedIn(harness) = event;
+        let Some((_, chat_id)) = self.sign_in_return.take_if(|(h, _)| h == harness) else {
+            return;
+        };
+        if matches!(self.route, Route::Settings(_)) {
+            crate::activate_main_window(cx);
+            self.open_chat(chat_id, cx);
+        }
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -4534,11 +4565,15 @@ impl Shell {
         cx.notify();
     }
 
-    fn ensure_accounts_page(&mut self, cx: &mut Context<Self>) -> Entity<AccountsPage> {
+    fn ensure_harnesses_page(&mut self, cx: &mut Context<Self>) -> Entity<HarnessesPage> {
+        if let Some(page) = &self.harnesses_page {
+            return page.clone();
+        }
         let state = self.state.clone();
-        self.accounts_page
-            .get_or_insert_with(|| cx.new(|cx| AccountsPage::new(state, cx)))
-            .clone()
+        let page = cx.new(|cx| HarnessesPage::new(state, cx));
+        self.harnesses_sub = Some(cx.subscribe(&page, Self::on_signed_in));
+        self.harnesses_page = Some(page.clone());
+        page
     }
 
     fn ensure_appearance_page(&mut self, cx: &mut Context<Self>) {
@@ -4722,17 +4757,17 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Harnesses => {
-                if self.harnesses_page.is_none() {
+            SettingsSection::Harnesses => self.ensure_harnesses_page(cx).into_any_element(),
+            SettingsSection::Agents => {
+                if self.accounts_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
                 }
-                match &self.harnesses_page {
+                match &self.accounts_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Agents => self.ensure_accounts_page(cx).into_any_element(),
             SettingsSection::Appearance => {
                 self.ensure_appearance_page(cx);
                 match &self.appearance_page {

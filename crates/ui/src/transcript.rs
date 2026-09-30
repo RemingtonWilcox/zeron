@@ -3299,8 +3299,9 @@ pub enum TranscriptEvent {
         frozen: bool,
     },
     /// A signed-out error chip's "Sign in again": run `harness`'s sign-in on
-    /// the device hosting the chat.
+    /// the device hosting `chat_id`, then return to it.
     SignIn {
+        chat_id: String,
         harness: HarnessId,
         device_id: String,
     },
@@ -6240,6 +6241,7 @@ impl Transcript {
     ) -> Option<AnyElement> {
         let chat_id = self.chat_id.as_deref()?;
         let chat = self.state.read(cx).chats.iter().find(|c| c.id == chat_id)?;
+        let chat_id = chat.id.clone();
         let harness = chat.config.as_ref()?.harness;
         let device_id = chat.device_id.clone();
         let key = SharedString::from(format!("{row_id}-sign-in"));
@@ -6248,6 +6250,7 @@ impl Transcript {
                 .id(key)
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(TranscriptEvent::SignIn {
+                        chat_id: chat_id.clone(),
                         harness,
                         device_id: device_id.clone(),
                     });

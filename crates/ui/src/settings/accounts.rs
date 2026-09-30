@@ -477,6 +477,14 @@ pub(crate) struct AccountsSnapshotCache(
 
 impl gpui::Global for AccountsSnapshotCache {}
 
+/// What the page tells its host.
+pub(crate) enum AccountsEvent {
+    /// A sign-in the page ran finished.
+    SignedIn(HarnessId),
+}
+
+impl gpui::EventEmitter<AccountsEvent> for AccountsPage {}
+
 pub struct AccountsPage {
     state: Entity<AppState>,
     embedded: bool,
@@ -580,16 +588,10 @@ impl AccountsPage {
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
-    /// Sign `harness` in on `target` (`None` = this device): a signed-out
-    /// error chip's "Sign in again". Agents with several logins (one per
-    /// provider) leave the pick to the page.
-    pub(crate) fn sign_in(
-        &mut self,
-        harness: HarnessId,
-        target: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_target_device(target, cx);
+    /// Start `harness`'s sign-in on the page's device: a signed-out error
+    /// chip's "Sign in again". Agents with several logins (one per provider)
+    /// leave the pick to the page.
+    pub(crate) fn sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if let [only] = login_options(harness).as_slice() {
             self.start_login(harness, only.provider, cx);
         }
@@ -876,6 +878,14 @@ impl AccountsPage {
         cx.notify();
     }
 
+    /// Either way a sign-in lands: close the flow, reload with fresh usage,
+    /// and tell the host.
+    fn signed_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.login = None;
+        self.load(force_usage_for(LoadTrigger::PostLogin), cx);
+        cx.emit(AccountsEvent::SignedIn(harness));
+    }
+
     /// Fold a StartAgentLogin reply into the flow `attempt` (if still open).
     fn apply_start(
         &mut self,
@@ -946,11 +956,9 @@ impl AccountsPage {
                 let Some(flow) = page.login.as_mut().filter(|f| f.attempt == attempt) else {
                     return;
                 };
+                let harness = flow.harness;
                 match result {
-                    Ok(_) => {
-                        page.login = None;
-                        page.load(force_usage_for(LoadTrigger::PostLogin), cx);
-                    }
+                    Ok(_) => page.signed_in(harness, cx),
                     Err(err) => {
                         flow.step = LoginStep::PasteCode {
                             submitting: false,
@@ -1016,11 +1024,11 @@ impl AccountsPage {
         let Some(flow) = self.login.as_mut().filter(|flow| flow.attempt == attempt) else {
             return true;
         };
+        let harness = flow.harness;
         let finished = match result {
             Ok(poll) => match poll.status {
                 AgentLoginStatus::Done => {
-                    self.login = None;
-                    self.load(force_usage_for(LoadTrigger::PostLogin), cx);
+                    self.signed_in(harness, cx);
                     true
                 }
                 AgentLoginStatus::Error => {
@@ -2421,19 +2429,6 @@ mod tests {
             .map(|a| a.id.as_str())
             .collect();
         assert_eq!(live, ["gpt-b", "copilot", "grok-a"]);
-    }
-
-    #[gpui::test]
-    fn sign_in_aims_the_page_at_the_chats_device(cx: &mut gpui::TestAppContext) {
-        let page = page(cx);
-        page.update(cx, |page, _, cx| {
-            page.sign_in(HarnessId::ClaudeCode, Some("remote".into()), cx);
-            assert_eq!(page.target_device.as_deref(), Some("remote"));
-            // Back on this device: the passthrough clears.
-            page.sign_in(HarnessId::ClaudeCode, None, cx);
-            assert_eq!(page.target_device, None);
-        })
-        .unwrap();
     }
 
     fn page(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<AccountsPage> {
