@@ -3842,8 +3842,9 @@ impl Shell {
             return;
         };
         if matches!(self.route, Route::Settings(_)) {
-            crate::activate_main_window(cx);
-            self.open_chat(chat_id, cx);
+            // Deferred: bringing the window forward updates this shell.
+            let state = self.state.clone();
+            cx.defer(move |cx| crate::open_notification_target(chat_id, &state, cx));
         }
     }
 
