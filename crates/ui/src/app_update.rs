@@ -366,6 +366,14 @@ impl AppUpdate {
         if self.dismissed.as_deref() == Some(latest) {
             return None;
         }
+        // Personal builds (personal.ps1) carry unmerged PRs; an official
+        // download would drop them, so the strip only says a rebuild is due.
+        if std::env::var_os("ZERON_PERSONAL_BUILD").is_some() {
+            return Some((
+                format!("v{latest} is out · rebuild your personal Zeron").into(),
+                StripAction::None,
+            ));
+        }
         Some(strip_for(
             &self.install,
             self.blocker.is_some(),
