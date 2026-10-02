@@ -442,6 +442,13 @@ pub struct TitleModelPicked(pub TitleSettings);
 
 impl gpui::EventEmitter<TitleModelPicked> for Pickers {}
 
+/// Another agent picked in a chat whose harness is fixed: the shell forks
+/// the conversation into a side chat running this config (the chat's own,
+/// with the picked harness and model) instead of switching it in place.
+pub struct ContinueInSideChat(pub ChatConfig);
+
+impl gpui::EventEmitter<ContinueInSideChat> for Pickers {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelSetting {
     Reasoning,
@@ -1661,6 +1668,7 @@ impl Pickers {
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         if self.harness_locked(cx) {
+            self.continue_in_side_chat(harness, None, cx);
             return;
         }
         if self.state.read(cx).side_chat_unsaved() && self.effective_harness(cx) != Some(harness) {
@@ -1895,7 +1903,7 @@ impl Pickers {
     /// The harness descriptors the picker rail offers, with the committed
     /// harness force-included even when it's outside the offered set (a
     /// dev session's mock harness, or one disabled after the chat existed).
-    /// Existing chats only offer their own harness.
+    /// In an existing chat, the others continue it in a side chat.
     fn rail_descriptors(&self, cx: &App) -> Vec<HarnessDescriptor> {
         let Some(list) = self.harnesses.ready() else {
             return Vec::new();
@@ -1907,11 +1915,40 @@ impl Pickers {
         {
             descriptors.insert(0, descriptor.clone());
         }
-        if self.harness_locked(cx) {
-            let effective = self.effective_harness(cx);
-            descriptors.retain(|d| Some(d.id) == effective);
-        }
         descriptors
+    }
+
+    /// A locked chat's pick of another agent: emit [`ContinueInSideChat`]
+    /// with the chat's config moved onto `harness`, at `model` or that
+    /// agent's last-used one with its remembered settings, and close.
+    fn continue_in_side_chat(
+        &mut self,
+        harness: HarnessId,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.effective_harness(cx) == Some(harness) {
+            return;
+        }
+        let Some(mut config) = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.config.clone())
+        else {
+            return;
+        };
+        let model = model.or_else(|| self.defaults.model_for(harness).map(|m| m.id.clone()));
+        config.harness = harness;
+        config.reasoning = self.defaults.reasoning_for(harness, model.as_deref());
+        config.model_options = model
+            .as_deref()
+            .and_then(|model| self.defaults.model_options_for(harness, model))
+            .cloned()
+            .unwrap_or_default();
+        config.model = model;
+        cx.emit(ContinueInSideChat(config));
+        self.close(cx);
     }
 
     /// The model rows the picker currently shows, flat and in render order —
@@ -2062,6 +2099,7 @@ impl Pickers {
         }
         if self.effective_harness(cx) != Some(row.harness) {
             if self.harness_locked(cx) {
+                self.continue_in_side_chat(row.harness, Some(row.model.id), cx);
                 return;
             }
             self.pick_harness(row.harness, cx);
@@ -6136,7 +6174,6 @@ mod tests {
             let (_, fork) = side_chat_picker(false, cx);
             fork.update(cx, |pickers, cx| {
                 assert!(pickers.harness_locked(cx));
-                assert_eq!(pickers.rail_descriptors(cx).len(), 1);
                 pickers.pick_harness(HarnessId::Codex, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
             });
@@ -6164,6 +6201,41 @@ mod tests {
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
             });
         });
+    }
+
+    #[gpui::test]
+    fn another_agent_in_a_locked_chat_continues_in_a_side_chat(cx: &mut gpui::TestAppContext) {
+        let picked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ChatConfig>::new()));
+        // Held past the update: the event is delivered when it flushes.
+        let _held = cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (state, pickers) = side_chat_picker(false, cx);
+            let sink = picked.clone();
+            cx.subscribe(&pickers, move |_, event: &ContinueInSideChat, _| {
+                sink.borrow_mut().push(event.0.clone());
+            })
+            .detach();
+            pickers.update(cx, |pickers, cx| {
+                pickers
+                    .defaults
+                    .remember_model(HarnessId::Codex, "codex-model".into(), "Codex model".into());
+                assert!(pickers.harness_locked(cx));
+                assert_eq!(pickers.rail_descriptors(cx).len(), 2, "every agent is offered");
+                // The chat's own agent is a no-op; another one continues it.
+                pickers.pick_harness(HarnessId::ClaudeCode, cx);
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            });
+            (state, pickers)
+        });
+        cx.run_until_parked();
+        let picked = picked.borrow();
+        assert_eq!(picked.len(), 1);
+        let config = &picked[0];
+        assert_eq!(config.harness, HarnessId::Codex);
+        assert_eq!(config.model.as_deref(), Some("codex-model"));
+        assert!(config.model_options.is_empty(), "the old agent's options stay behind");
+        assert_eq!(config.sandbox, SandboxLevel::ReadOnly, "the chat's sandbox carries over");
     }
 
     #[gpui::test]
@@ -8210,10 +8282,12 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
-                // A chat's provider is fixed: the provider page stays shut.
+                // A chat's provider is fixed: the provider page offers the
+                // others, which continue the chat in a side chat.
                 picker.compact_model_list = false;
                 picker.show_compact_providers(cx);
-                assert!(!picker.compact_providers);
+                assert!(picker.compact_providers);
+                picker.show_compact_panel(cx);
                 picker.focus_on_mount = true;
             })
             .unwrap();

@@ -2111,6 +2111,10 @@ impl Shell {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
                 }
+                ComposerEvent::ContinueInSideChat(config) => {
+                    let state = this.state.clone();
+                    this.continue_in_side_chat(&state, config.clone(), cx);
+                }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
