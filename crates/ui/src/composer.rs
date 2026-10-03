@@ -11867,7 +11867,10 @@ mod tests {
     /// of them ride along with the resend.
     #[gpui::test]
     fn resend_sends_the_prompt_and_keeps_the_composer_as_it_was(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
         let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
         let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
