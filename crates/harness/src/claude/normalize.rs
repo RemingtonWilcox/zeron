@@ -2,7 +2,7 @@
 //! decoding, error-code mapping).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, ErrorCause, HarnessId, TodoItem, TodoStatus, ToolCall};
 
 use super::wire::{ContentBlock, Frame};
 
@@ -23,6 +23,15 @@ fn assistant_error_text(code: &str) -> String {
         "max_output_tokens" => "The reply hit the maximum output length.".into(),
         "unknown" => "Claude returned an unspecified error.".into(),
         other => format!("Claude error: {other}"),
+    }
+}
+
+/// The error event for an assistant-level error code, with the cause the
+/// error card offers a remedy for.
+fn assistant_error(code: &str) -> AgentEvent {
+    AgentEvent::Error {
+        message: assistant_error_text(code),
+        cause: (code == "authentication_failed").then_some(ErrorCause::SignedOut),
     }
 }
 
@@ -106,9 +115,11 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: str_field(t, "content"),
-                    done: t.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|t| {
+                    TodoItem::new(
+                        str_field(t, "content"),
+                        TodoStatus::parse(t.get("status").and_then(Value::as_str).unwrap_or("")),
+                    )
                 })
                 .collect(),
         },
@@ -495,12 +506,7 @@ impl Normalizer {
                         })
                         .collect();
                     if let Some(code) = &f.error {
-                        out.push(tag(
-                            parent,
-                            AgentEvent::Error {
-                                message: assistant_error_text(code),
-                            },
-                        ));
+                        out.push(tag(parent, assistant_error(code)));
                     }
                     return out;
                 }
@@ -589,9 +595,7 @@ impl Normalizer {
                 // carries a terse `error` code here — often with empty content
                 // and no `result` error — so surface it visibly.
                 if let Some(code) = &f.error {
-                    out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
-                    });
+                    out.push(assistant_error(code));
                 }
                 // The enclosing assistant frame closes the streamed message
                 // item; rotate so post-boundary deltas get a fresh id.
@@ -664,6 +668,7 @@ impl Normalizer {
                     message: format!(
                         "Claude {window} limit reached — the turn was blocked. Try again after it resets."
                     ),
+                    cause: None,
                 }]
             }
 
@@ -803,10 +808,27 @@ mod tests {
                 &json!({"todos": [{"content": "t", "status": "completed"}]})
             ),
             ToolCall::Todo {
-                items: vec![TodoItem {
-                    text: "t".into(),
-                    done: true
-                }]
+                items: vec![TodoItem::new("t", TodoStatus::Completed)]
+            }
+        );
+        // Claude's in-progress state survives; unknown/missing reads as pending.
+        assert_eq!(
+            decode_tool_use(
+                "TodoWrite",
+                &json!({"todos": [
+                    {"content": "a", "status": "completed"},
+                    {"content": "b", "status": "in_progress", "activeForm": "Doing b"},
+                    {"content": "c", "status": "pending"},
+                    {"content": "d"},
+                ]})
+            ),
+            ToolCall::Todo {
+                items: vec![
+                    TodoItem::new("a", TodoStatus::Completed),
+                    TodoItem::new("b", TodoStatus::InProgress),
+                    TodoItem::new("c", TodoStatus::Pending),
+                    TodoItem::new("d", TodoStatus::Pending),
+                ]
             }
         );
         assert_eq!(
@@ -1355,6 +1377,30 @@ mod tests {
                 assert_eq!(error, None, "diagnostic-only failure surfaces no text");
             }
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signed_out_errors_carry_their_cause() {
+        // The frame the CLI writes when a refresh token is dead (2.1.286).
+        let cause_of = |code: &str| {
+            let raw = format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","model":"<synthetic>","content":[{{"type":"text","text":"Failed to authenticate"}}]}},"error":"{code}"}}"#
+            );
+            normalize_one(&raw)
+                .into_iter()
+                .find_map(|event| match event {
+                    AgentEvent::Error { cause, .. } => Some(cause),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            cause_of("authentication_failed"),
+            Some(Some(ErrorCause::SignedOut))
+        );
+        // Other failures surface with no remedy to offer.
+        for code in ["rate_limit", "overloaded", "billing_error", "server_error"] {
+            assert_eq!(cause_of(code), Some(None), "{code}");
         }
     }
 

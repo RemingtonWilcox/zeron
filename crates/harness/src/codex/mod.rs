@@ -1339,6 +1339,14 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // Codex's `update_plan` tool: the whole checklist, replaced
+                    // on every call, with an in-progress step.
+                    "turn/plan/updated" => {
+                        for ev in normalize::plan_update_events(&params) {
+                            if !send(&event_tx, ev).await { break 'main; }
+                        }
+                    }
+
                     "turn/completed" => {
                         let id = turn_id(&params);
                         router.note_completed(&id);
@@ -1464,7 +1472,7 @@ async fn run_session(session: Session) {
                             .or_else(|| params.get("message").and_then(Value::as_str))
                             .unwrap_or("Codex error")
                             .to_owned();
-                        if !send(&event_tx, AgentEvent::Error { message }).await {
+                        if !send(&event_tx, AgentEvent::Error { message, cause: None }).await {
                             break 'main;
                         }
                     }
@@ -1671,6 +1679,7 @@ async fn steer_as_new_turn(
                 event_tx,
                 AgentEvent::Error {
                     message: format!("Steering failed: {e}"),
+                    cause: None,
                 },
             )
             .await;

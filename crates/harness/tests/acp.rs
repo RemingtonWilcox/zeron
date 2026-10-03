@@ -15,7 +15,7 @@ use zeron_harness::{
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
-    TodoItem, ToolCall, UserInputAnswer,
+    TodoItem, TodoStatus, ToolCall, UserInputAnswer,
 };
 
 fn fixture_path() -> PathBuf {
@@ -199,14 +199,8 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
         id: "acp-plan".into(),
         call: ToolCall::Todo {
             items: vec![
-                TodoItem {
-                    text: "read".into(),
-                    done: true
-                },
-                TodoItem {
-                    text: "fix".into(),
-                    done: false
-                },
+                TodoItem::new("read", TodoStatus::Completed),
+                TodoItem::new("fix", TodoStatus::InProgress),
             ]
         },
     }));
@@ -1632,7 +1626,7 @@ async fn acp_failed_load_announces_lost_context() {
     let mut req = request("fresh");
     req.resume = Some("missing".into());
     let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("without the previous context"))));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 

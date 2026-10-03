@@ -61,6 +61,7 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod todo_panel;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
@@ -268,9 +269,14 @@ pub(crate) fn activate_main_window(cx: &mut App) {
     }
 }
 
-/// A clicked banner: bring Zeron forward on its chat or settings destination,
-/// reopening the main window first if ⌘W closed it.
-fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+/// Bring Zeron forward on a clicked banner's chat or settings destination, or
+/// the chat a finished sign-in returns to, reopening the main window first if
+/// ⌘W closed it.
+pub(crate) fn open_notification_target(
+    target: String,
+    state: &gpui::Entity<state::AppState>,
+    cx: &mut App,
+) {
     activate_main_window(cx);
     let shell = cx
         .windows()

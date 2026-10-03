@@ -15,7 +15,7 @@ use zeron_harness::{
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
-    ToolCall, UserInputAnswer, UserInputQuestion,
+    TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -293,14 +293,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         id: "td1".into(),
         call: ToolCall::Todo {
             items: vec![
-                TodoItem {
-                    text: "a".into(),
-                    done: true
-                },
-                TodoItem {
-                    text: "b".into(),
-                    done: false
-                },
+                TodoItem::new("a", TodoStatus::Completed),
+                TodoItem::new("b", TodoStatus::Pending),
             ]
         },
     }));
@@ -1560,7 +1554,7 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                 assert_eq!(status, DoneStatus::Completed, "{error:?}");
                 events.push("done".into());
             }
-            AgentEvent::Error { message } => panic!("{message}"),
+            AgentEvent::Error { message, .. } => panic!("{message}"),
             _ => {}
         }
     }
