@@ -24,6 +24,7 @@ pub mod change_requests;
 pub mod changes;
 mod comment_ui;
 pub mod comments;
+pub mod pasted;
 pub mod composer;
 mod composer_dock;
 mod composer_markdown;

@@ -1690,6 +1690,8 @@ pub enum ComposerInputEvent {
     PastedImages(Vec<gpui::Image>),
     /// File paths pasted from the clipboard (a file manager "Copy").
     PastedPaths(Vec<PathBuf>),
+    /// A paste past [`crate::pasted::MIN_CHARS`]: staged as a chip, not typed.
+    PastedLongText(String),
     PastedText {
         range: Range<usize>,
         revision: u64,
@@ -3218,6 +3220,10 @@ impl ComposerInput {
                         }
                     }
                 }
+            }
+            if self.mentions_enabled && !self.single_line && crate::pasted::is_long(&text) {
+                cx.emit(ComposerInputEvent::PastedLongText(text));
+                return;
             }
             // Clipboard operations remain separate undo steps, even a one-character paste.
             self.last_edit = None;
@@ -5629,6 +5635,8 @@ pub struct Composer {
     /// attachments. Each owns one screenshot that joins the existing upload
     /// path only at send time.
     pub(crate) appshots: HashMap<String, Vec<CapturedAppshot>>,
+    /// Long pastes staged as chips, keyed like drafts (see [`crate::pasted`]).
+    pasted: HashMap<String, Vec<crate::pasted::PastedText>>,
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
@@ -5903,6 +5911,14 @@ impl Composer {
             ComposerInputEvent::PastedText { range, revision } => {
                 this.resolve_pasted_references(range.clone(), *revision, cx);
             }
+            ComposerInputEvent::PastedLongText(text) => {
+                let key = this.current_key.clone();
+                this.pasted
+                    .entry(key)
+                    .or_default()
+                    .push(crate::pasted::PastedText::new(text.clone()));
+                cx.notify();
+            }
         });
         cx.observe_global::<crate::settings::SettingsStore>(|this, cx| {
             if !crate::settings::current(cx).dictation_enabled {
@@ -5920,7 +5936,7 @@ impl Composer {
                     && composer_has_content(
                         this.input.read(cx).text(),
                         this.staged().len() + this.staged_appshots().len(),
-                        this.staged_comments(cx).len(),
+                        this.staged_context(cx),
                     )
                 {
                     this.on_submit(cx);
@@ -5936,6 +5952,7 @@ impl Composer {
             drafts: HashMap::new(),
             attachments: HashMap::new(),
             appshots: HashMap::new(),
+            pasted: HashMap::new(),
             appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
@@ -6181,7 +6198,7 @@ impl Composer {
         composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_context(cx),
         )
     }
 
@@ -6306,9 +6323,22 @@ impl Composer {
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
         self.appshots.remove(chat_id);
+        self.pasted.remove(chat_id);
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
         });
+    }
+
+    /// Review comments plus staged pastes: the chips in the context strip.
+    fn staged_context(&self, cx: &App) -> usize {
+        self.staged_comments(cx).len() + self.staged_pasted().len()
+    }
+
+    fn staged_pasted(&self) -> &[crate::pasted::PastedText] {
+        self.pasted
+            .get(&self.current_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Staged in `AppState` because the changes pane writes them.
@@ -6319,29 +6349,70 @@ impl Composer {
             .to_vec()
     }
 
-    fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
+    fn render_comments_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let count = self.staged_comments(cx).len();
-        if count == 0 {
+        let pasted = self.staged_pasted().to_vec();
+        if count == 0 && pasted.is_empty() {
             return None;
         }
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .px(px(STRIP_PAD_X))
-                .pt(px(STRIP_PAD_TOP))
-                .child(crate::badges::render(
-                    "composer-comments",
-                    &crate::badges::MessageBadge {
-                        icon: crate::icons::CHAT_ROUND_LINE,
-                        label: crate::comments::chip_label(count).into(),
-                        // The staged set is already on screen in the changes
-                        // pane, so a hover card would only repeat it.
-                        details: Vec::new(),
-                    },
-                    theme,
-                )),
-        )
+        let mut strip = div()
+            .flex()
+            .flex_row()
+            .gap(px(STRIP_GAP))
+            .overflow_hidden()
+            .px(px(STRIP_PAD_X))
+            .pt(px(STRIP_PAD_TOP));
+        if count > 0 {
+            strip = strip.child(crate::badges::render(
+                "composer-comments",
+                &crate::badges::MessageBadge {
+                    icon: crate::icons::CHAT_ROUND_LINE,
+                    label: crate::comments::chip_label(count).into(),
+                    // The staged set is already on screen in the changes
+                    // pane, so a hover card would only repeat it.
+                    details: Vec::new(),
+                },
+                theme,
+            ));
+        }
+        for (ix, paste) in pasted.into_iter().enumerate() {
+            let badge = paste.badge();
+            let id = paste.id.clone();
+            strip = strip.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(crate::badges::render(("composer-paste", ix), &badge, theme))
+                    .child(
+                        div()
+                            .id(("composer-paste-remove", ix))
+                            .size(px(18.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.ink(0.08)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                let key = this.current_key.clone();
+                                if let Some(slot) = this.pasted.get_mut(&key) {
+                                    slot.retain(|paste| paste.id != id);
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
+            );
+        }
+        Some(strip)
     }
 
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
@@ -7907,7 +7978,7 @@ impl Composer {
             || composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len(),
-                self.staged_comments(cx).len(),
+                self.staged_context(cx),
             );
         send_button_mode(self.run_live(cx), has_text)
     }
@@ -7962,7 +8033,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_context(cx),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -7995,7 +8066,7 @@ impl Composer {
         let has_content = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_context(cx),
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
@@ -8122,8 +8193,12 @@ impl Composer {
             }
             taken
         });
+        let pasted = self.pasted.remove(&key).unwrap_or_default();
         let typed = text.clone();
-        let text = crate::comments::with_comments(&text, &comments);
+        let text = crate::comments::with_comments(
+            &crate::pasted::with_pasted(&text, &pasted),
+            &comments,
+        );
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -8773,6 +8848,10 @@ impl Composer {
                         }
                         cx.notify();
                     });
+                    if !pasted.is_empty() {
+                        let slot = composer.pasted.entry(restore_key.clone()).or_default();
+                        slot.splice(0..0, pasted.iter().cloned());
+                    }
                     if is_new && composer.current_key != restore_key {
                         // A re-key swap to the canvas is pending (the
                         // select_chat(None) above); it loads this draft into
@@ -10113,7 +10192,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len(),
-                self.staged_comments(cx).len(),
+                self.staged_context(cx),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
@@ -10175,7 +10254,7 @@ impl Render for Composer {
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
-        let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
+        let comment_strip_h = comment_strip_height(self.staged_context(cx));
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
         } else if expanded {
@@ -12443,6 +12522,34 @@ mod tests {
                 "stale discovery cannot change a restored draft"
             );
         });
+    }
+
+    #[gpui::test]
+    fn a_long_paste_stages_a_chip_and_a_short_one_types(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                let long = "line of a long log\n".repeat(200);
+                composer.input.update(cx, |input, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(long.clone()));
+                    input.paste(&Paste, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |composer, window, cx| {
+                assert_eq!(composer.input.read(cx).text(), "", "the input stays clean");
+                assert_eq!(composer.staged_pasted().len(), 1);
+                assert!(composer.has_draft(cx), "a paste alone is a draft");
+                composer.input.update(cx, |input, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string("short".into()));
+                    input.paste(&Paste, window, cx);
+                });
+                assert_eq!(composer.input.read(cx).text(), "short");
+                assert_eq!(composer.staged_pasted().len(), 1);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
