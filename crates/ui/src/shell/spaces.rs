@@ -5836,7 +5836,7 @@ impl Shell {
             .read(cx)
             .spaces
             .iter()
-            .find(|s| s.device_id == device.id && s.path == path)
+            .find(|s| s.device_id == device.id && crate::pickers::same_folder(&s.path, &path))
             .map(|s| s.id.clone())
         {
             self.add_space = None;
