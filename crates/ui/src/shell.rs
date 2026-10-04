@@ -60,6 +60,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod actions_ui;
 mod chat_dropzone;
+mod device_colors;
 #[cfg(test)]
 mod chat_dropzone_tests;
 #[cfg(test)]
@@ -7189,6 +7190,16 @@ impl Shell {
         // their archive control occupies the remote-icon slot on hover.
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
+        // Which computer this session runs on, as a color (see
+        // [`device_colors`]).
+        let device_dot = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == id)
+                .and_then(|chat| device_colors::device_color(state, &chat.device_id))
+        };
         let row_id = if search_query.is_some() {
             format!("palette-chat-{id}")
         } else {
@@ -7651,6 +7662,14 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
+                        .children(device_dot.map(|color| {
+                            div()
+                                .size(px(6.0))
+                                .flex_none()
+                                .mr(px(-4.0))
+                                .rounded_full()
+                                .bg(color)
+                        }))
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,

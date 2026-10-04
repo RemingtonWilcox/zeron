@@ -295,6 +295,10 @@ impl Shell {
         // drag region, and buttons. A session appends its target as a muted
         // "project @ device" tag right of the title (the composer footer no
         // longer carries it).
+        // The tag opens the session's folder: in the system file manager when
+        // it is on this device, in Zeron's explorer when it is on another.
+        let mut target_open: Option<(Option<std::path::PathBuf>, String)> = None;
+        let mut target_dot = None;
         let (title, target, harness, on_canvas): (
             SharedString,
             Option<SharedString>,
@@ -313,6 +317,20 @@ impl Shell {
                     let device = state
                         .device_name(&chat.device_id)
                         .unwrap_or("Unknown device");
+                    let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
+                    let path = chat
+                        .cwd
+                        .clone()
+                        .or_else(|| {
+                            chat.space_id
+                                .as_deref()
+                                .and_then(|id| state.space_row(id))
+                                .map(|space| space.path.clone())
+                        })
+                        .filter(|_| local)
+                        .map(std::path::PathBuf::from);
+                    target_open = Some((path, device.to_string()));
+                    target_dot = super::device_colors::device_color(state, &chat.device_id);
                     (
                         SharedString::from(transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
@@ -607,13 +625,41 @@ impl Shell {
                                 .child(title),
                         )
                         .when_some(target, |el, target| {
+                            let (path, device) = target_open.clone().unwrap_or_default();
+                            let hint = match &path {
+                                Some(_) if cfg!(target_os = "macos") => "Open in Finder".to_string(),
+                                Some(_) if cfg!(windows) => "Open in File Explorer".to_string(),
+                                Some(_) => "Open folder".to_string(),
+                                None => format!("Browse files on {device}"),
+                            };
                             el.child(
                                 div()
+                                    .id("titlebar-session-target")
                                     .min_w_0()
-                                    .truncate()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .px(px(4.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .text_color(theme.text_muted.opacity(0.5))
-                                    .child(target),
+                                    .hover(|style| {
+                                        style.bg(theme.ink(0.06)).text_color(theme.text_muted)
+                                    })
+                                    .tooltip(crate::settings::widgets::text_tooltip(hint))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        match &path {
+                                            Some(path) => cx.open_with_system(path),
+                                            None => this.add_files_surface(window, cx),
+                                        }
+                                    }))
+                                    .children(target_dot.map(|color| {
+                                        div().size(px(6.0)).flex_none().rounded_full().bg(color)
+                                    }))
+                                    .child(div().min_w_0().truncate().child(target)),
                             )
                         }),
                 )
