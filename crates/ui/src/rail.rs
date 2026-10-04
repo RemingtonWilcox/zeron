@@ -155,6 +155,15 @@ pub fn tick_buckets(n: usize, capacity: usize) -> Vec<(usize, usize)> {
 }
 
 /// The bucket containing tick `ix` (for active/hover mapping).
+/// The prompt a bucket's mark stands for: the ACTIVE tick when it falls
+/// inside (hover then previews what you're reading), the newest prompt for
+/// the last bucket (so the bottom mark is always "latest" as turns arrive),
+/// the bucket's first prompt otherwise.
+pub fn bucket_representative(start: usize, end: usize, len: usize, active: Option<usize>) -> usize {
+    let fallback = if end == len && end > start { end - 1 } else { start };
+    active.filter(|&a| a >= start && a < end).unwrap_or(fallback)
+}
+
 pub fn bucket_of(buckets: &[(usize, usize)], ix: usize) -> Option<usize> {
     buckets.iter().position(|&(s, e)| ix >= s && ix < e)
 }
@@ -480,10 +489,7 @@ impl Transcript {
             .justify_center()
             .gap(px(TICK_GAP))
             .children(buckets.into_iter().enumerate().map(|(ix, (start, end))| {
-                // The bucket's representative prompt: the ACTIVE tick when it
-                // falls inside (hover then previews what you're reading),
-                // the first prompt of the range otherwise.
-                let rep = active.filter(|&a| a >= start && a < end).unwrap_or(start);
+                let rep = bucket_representative(start, end, pairs.len(), active);
                 let (tick, row) = &pairs[rep];
                 let (tick, row) = (tick.clone(), *row);
                 let bucket_len = end - start;
@@ -635,6 +641,18 @@ mod tests {
         for &(s, e) in &b {
             assert!((e - s) == 12 || (e - s) == 13, "even split, got {}", e - s);
         }
+    }
+
+    #[test]
+    fn the_bottom_mark_stands_for_the_newest_prompt() {
+        let buckets = tick_buckets(20, 12);
+        let (start, end) = *buckets.last().unwrap();
+        assert_eq!(bucket_representative(start, end, 20, None), 19);
+        // Earlier marks keep their first prompt, and reading wins anywhere.
+        let (start, end) = buckets[0];
+        assert_eq!(bucket_representative(start, end, 20, None), start);
+        let (start, end) = *buckets.last().unwrap();
+        assert_eq!(bucket_representative(start, end, 20, Some(start)), start);
     }
 
     #[test]

@@ -3225,6 +3225,10 @@ pub struct Transcript {
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
     scroll_anim: Option<Task<()>>,
+    /// Whether the wheel input behind the pending scroll event went up (away
+    /// from the tail). Set by the root's wheel listener, read once by
+    /// [`Self::handle_scroll`]; `None` for input without a wheel delta.
+    wheel_up: Option<bool>,
     /// Last pointer sample while markdown selection owns a left-button drag.
     selection_drag_position: Option<Point<Pixels>>,
     /// One-shot timer rescheduled only while the pointer remains in an edge
@@ -3538,6 +3542,7 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
+            wheel_up: None,
             selection_drag_position: None,
             selection_scroll_task: None,
             rail_enabled,
@@ -3791,6 +3796,7 @@ impl Transcript {
                 // frame callbacks are paused; reasserting its old prompt here
                 // made scrolling down impossible until an upward gesture.
                 if this.own_turn.is_some() {
+                    this.wheel_up = None;
                     let distance = this.distance_from_bottom();
                     let previous = this.last_scroll_distance;
                     this.last_scroll_distance = distance;
@@ -3828,15 +3834,29 @@ impl Transcript {
                 let distance = this.distance_from_bottom();
                 let previous = this.last_scroll_distance;
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
-                    // User input moving away from the bottom breaks the pin.
-                    // Content growth never lands here — it doesn't fire the
-                    // scroll handler (mugen §1e: interrupt from input, not
-                    // scrollbar position).
+                // Decide from the input's direction when it has one. The
+                // distance baseline lags streaming growth by at least a
+                // layout, so growth since then read as "scrolled away": a
+                // wheel-down mid-stream broke the pin, and re-sticking
+                // needed the very last pixel.
+                let (moved_away, toward_bottom) = match this.wheel_up.take() {
+                    Some(up) => (
+                        up && distance > AT_BOTTOM_PX,
+                        !up && distance <= STICK_THRESHOLD_PX,
+                    ),
+                    None => (
+                        distance > previous + 1.0 && distance > AT_BOTTOM_PX,
+                        Self::should_restick(distance, previous),
+                    ),
+                };
+                if moved_away {
+                    // User input moving away from the bottom breaks the pin
+                    // (mugen §1e: interrupt from input, not scrollbar
+                    // position).
                     this.pinned = false;
                     this.spring.reset();
                     this.spring_last_tick = None;
-                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
+                } else if distance <= AT_BOTTOM_PX || toward_bottom {
                     // Returning toward the bottom inside the 70px band (or
                     // arriving at it) re-engages the pin with a glide.
                     if !this.pinned {
@@ -4398,6 +4418,8 @@ impl Transcript {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         self.discard_pending_viewport();
+        // A rail glide still running would fight the bottom spring.
+        self.scroll_anim = None;
         // An expanded prompt can be taller than the viewport. Its reservation
         // is retained, but jumping should reveal the reply below that prompt.
         if self.own_turn_anchor_ix().is_some_and(|ix| {
@@ -4413,7 +4435,11 @@ impl Transcript {
         // makes prompt-at-top and pad-bottom the same place): re-arm the hold
         // and glide back instead of destroying the runway (user spec — only
         // navigating away and back clears it).
-        if let Some(anchor) = self.own_turn.as_mut() {
+        // Without its prompt row there is nothing to hold, and re-arming the
+        // hold would swallow the click.
+        if self.own_turn_anchor_ix().is_some()
+            && let Some(anchor) = self.own_turn.as_mut()
+        {
             anchor.held = true;
             anchor.positioned = false;
             self.own_turn_last_tick = None;
@@ -9262,6 +9288,13 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
+                // gpui: positive y scrolls toward the top.
+                let dy = event.delta.pixel_delta(px(16.0)).y;
+                if dy != px(0.0) {
+                    this.wheel_up = Some(dy > px(0.0));
+                }
+            }))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -12365,6 +12398,38 @@ mod tests {
                         assert!(transcript.read(cx).distance_from_bottom() <= 0.5);
                     }
                 }
+            });
+        }
+
+        #[test]
+        fn wheel_direction_not_stale_distance_decides_the_pin() {
+            with_window(|transcript, window, cx| {
+                let entries: Vec<_> = (0..40).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
+                transcript.update(cx, |this, cx| {
+                    this.rail_enabled = false;
+                    feed(this, entries, cx);
+                });
+                draw(window, cx);
+                // Pinned, but the view sits well above the end and the
+                // distance baseline predates that growth: a stream outran
+                // the last layout.
+                transcript.update(cx, |this, _| {
+                    this.pinned = true;
+                    this.list.scroll_to(ListOffset {
+                        item_ix: 20,
+                        offset_in_item: px(0.0),
+                    });
+                    this.last_scroll_distance = 0.0;
+                });
+                draw(window, cx);
+                assert!(transcript.read(cx).distance_from_bottom() > STICK_THRESHOLD_PX);
+                wheel(window, -40.0, cx);
+                assert!(
+                    transcript.read(cx).pinned,
+                    "a wheel toward the bottom never breaks the pin"
+                );
+                wheel(window, 40.0, cx);
+                assert!(!transcript.read(cx).pinned, "a wheel away from it does");
             });
         }
 
