@@ -60,12 +60,12 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod actions_ui;
 mod chat_dropzone;
-mod device_colors;
 #[cfg(test)]
 mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
+mod device_colors;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
