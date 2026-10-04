@@ -380,14 +380,29 @@ impl SessionDoc {
     }
 
     /// Replace the totals; a recount that changed nothing writes nothing.
-    pub fn set_token_usage(&self, usage: zeron_proto::ChatTokenUsage) -> Result<(), DocError> {
-        if self.token_usage() != Some(usage) {
+    /// Recounts carry no weekly share, so the stored one is kept.
+    pub fn set_token_usage(&self, mut usage: zeron_proto::ChatTokenUsage) -> Result<(), DocError> {
+        let current = self.token_usage();
+        usage.week_ppm = usage
+            .week_ppm
+            .max(current.map_or(0, |current| current.week_ppm));
+        if current != Some(usage) {
             self.doc
                 .get_map("meta")
                 .insert("tokenUsage", serde_json::to_string(&usage)?)?;
             self.doc.commit();
         }
         Ok(())
+    }
+
+    /// Add to the chat's share of its account's weekly limit.
+    pub fn add_week_share(&self, ppm: u64) -> Result<(), DocError> {
+        if ppm == 0 {
+            return Ok(());
+        }
+        let mut usage = self.token_usage().unwrap_or_default();
+        usage.week_ppm += ppm;
+        self.set_token_usage(usage)
     }
 
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
@@ -1431,6 +1446,20 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
+
+    #[test]
+    fn recounts_keep_the_weekly_share() {
+        let doc = SessionDoc::init("week").unwrap();
+        doc.add_week_share(20_000).unwrap();
+        doc.add_week_share(5_000).unwrap();
+        doc.set_token_usage(zeron_proto::ChatTokenUsage {
+            output: 7,
+            ..Default::default()
+        })
+        .unwrap();
+        let usage = doc.token_usage().unwrap();
+        assert_eq!((usage.output, usage.week_ppm), (7, 25_000));
+    }
 
     #[test]
     fn fork_seam_round_trips_through_the_doc() {

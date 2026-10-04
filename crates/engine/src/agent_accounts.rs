@@ -738,7 +738,12 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// Told each live account's weekly window (see [`crate::week_share`]).
+    week_listener: std::sync::OnceLock<WeekListener>,
 }
+
+/// Called with each successful weekly reading of a harness's live account.
+pub type WeekListener = Arc<dyn Fn(crate::week_share::WeekReading) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -829,8 +834,14 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                week_listener: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Wire the weekly-reading listener (called once at engine assembly).
+    pub fn set_week_listener(&self, listener: WeekListener) {
+        let _ = self.inner.week_listener.set(listener);
     }
 
     /// Test seam: run `harness`'s sign-in with the CLI at `path` instead of
@@ -2615,6 +2626,26 @@ impl AgentAccounts {
             return;
         }
         let results = futures::future::join_all(probes).await;
+        if let Some(listener) = self.inner.week_listener.get() {
+            for &(harness, slot, active) in targets {
+                let key = usage_key(harness, &slot.account_key);
+                let week = results
+                    .iter()
+                    .find(|(probed, _, _)| *probed == key)
+                    .and_then(|(_, _, result)| result.as_ref().ok())
+                    .and_then(|usage| usage.windows.iter().find(|w| w.label == "Week"));
+                if active
+                    && crate::week_share::TRACKED.contains(&harness)
+                    && let Some(week) = week
+                {
+                    listener(crate::week_share::WeekReading {
+                        harness,
+                        account: slot.account_key.clone(),
+                        used: week.used_fraction as f64,
+                    });
+                }
+            }
+        }
         let now = now_ms();
         let mut usage = lock(&self.inner.usage);
         for (key, credentials, result) in results {

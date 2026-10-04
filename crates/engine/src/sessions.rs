@@ -171,6 +171,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Chats that ran since the last account reading; see [`crate::week_share`].
+    week_shares: Mutex<crate::week_share::WeekShares>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -208,6 +210,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                week_shares: Mutex::new(Default::default()),
             }),
         }
     }
@@ -262,6 +265,16 @@ impl SessionsEngine {
         if let Some(listener) = self.inner.turn_listener.get() {
             listener(chat_id, cwd);
         }
+        let inner = self.inner.clone();
+        let chat_id = chat_id.to_string();
+        tokio::task::spawn_blocking(move || inner.note_week_turn(&chat_id));
+    }
+
+    /// A probe of a harness's live account came back (wired from
+    /// [`crate::AgentAccounts::set_week_listener`]).
+    pub fn note_week_reading(&self, reading: crate::week_share::WeekReading) {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.split_week_reading(reading));
     }
 
     /// Count `chat_id`'s tokens off the runtime: after a run, and the first
@@ -1290,28 +1303,23 @@ impl Inner {
 
     /// Sum every provider session this chat used, from the CLIs' own
     /// transcripts (see [`zeron_harness::usage`]), into the chat doc. Only
-    /// the host device has those files. Blocking.
-    fn count_token_usage(&self, chat_id: &str, only_if_missing: bool) {
-        let Some(chat) = self
+    /// the host device has those files. Returns what it counted. Blocking.
+    fn count_token_usage(
+        &self,
+        chat_id: &str,
+        only_if_missing: bool,
+    ) -> Option<zeron_proto::ChatTokenUsage> {
+        let chat = self
             .workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-        else {
-            return;
-        };
-        let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
-            return;
-        };
-        let Some(host) = self.doc_host() else {
-            return;
-        };
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())?;
+        let harness = chat.config.as_ref().map(|config| config.harness)?;
+        let host = self.doc_host()?;
         if chat.device_id != self.device_id {
-            return;
+            return None;
         }
-        let Ok(handle) = host.open(chat_id) else {
-            return;
-        };
+        let handle = host.open(chat_id).ok()?;
         if only_if_missing && handle.doc().token_usage().is_some() {
-            return;
+            return None;
         }
         let mut sessions = self.journal_harness_sessions(chat_id);
         if let Some(id) = chat.harness_session_id.filter(|id| !id.is_empty()) {
@@ -1332,8 +1340,59 @@ impl Inner {
                 counted = true;
             }
         }
-        if counted && let Err(err) = handle.doc().set_token_usage(total) {
+        if !counted {
+            return None;
+        }
+        if let Err(err) = handle.doc().set_token_usage(total) {
             tracing::warn!(chat = %chat_id, error = %err, "token usage write failed");
+        }
+        Some(total)
+    }
+
+    /// A turn started: the chat joins the next weekly-limit split, measured
+    /// from its current totals (counted now if it has none yet). Blocking.
+    fn note_week_turn(&self, chat_id: &str) {
+        let Some(harness) = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.config)
+            .map(|config| config.harness)
+            .filter(|harness| crate::week_share::TRACKED.contains(harness))
+        else {
+            return;
+        };
+        let tokens = self
+            .doc_host()
+            .and_then(|host| host.open(chat_id).ok())
+            .and_then(|handle| handle.doc().token_usage())
+            .or_else(|| self.count_token_usage(chat_id, false))
+            .unwrap_or_default();
+        lock(&self.week_shares).note_turn(chat_id, harness, tokens);
+    }
+
+    /// Split an account reading's weekly rise among the chats that ran since
+    /// the last one, recounted now. Blocking.
+    fn split_week_reading(&self, reading: crate::week_share::WeekReading) {
+        let chats = lock(&self.week_shares).chats(reading.harness);
+        let now: HashMap<String, zeron_proto::ChatTokenUsage> = chats
+            .into_iter()
+            .filter_map(|chat| {
+                let tokens = self.count_token_usage(&chat, false)?;
+                Some((chat, tokens))
+            })
+            .collect();
+        let live: std::collections::HashSet<String> = lock(&self.runs).keys().cloned().collect();
+        let shares =
+            lock(&self.week_shares).apply(reading, &now, |chat| live.contains(chat));
+        let Some(host) = self.doc_host() else {
+            return;
+        };
+        for (chat_id, ppm) in shares {
+            if let Ok(handle) = host.open(&chat_id)
+                && let Err(err) = handle.doc().add_week_share(ppm)
+            {
+                tracing::warn!(chat = %chat_id, error = %err, "weekly share write failed");
+            }
         }
     }
 
