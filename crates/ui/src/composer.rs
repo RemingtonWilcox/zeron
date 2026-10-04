@@ -5644,6 +5644,10 @@ pub struct Composer {
     pub(crate) appshots: HashMap<String, Vec<CapturedAppshot>>,
     /// Long pastes staged as chips, keyed like drafts (see [`crate::pasted`]).
     pasted: HashMap<String, Vec<crate::pasted::PastedText>>,
+    /// The staged paste open in the full-text viewer.
+    paste_view: Option<String>,
+    paste_view_focus: FocusHandle,
+    paste_view_scroll: gpui::ScrollHandle,
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
@@ -5971,6 +5975,9 @@ impl Composer {
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             pasted: HashMap::new(),
+            paste_view: None,
+            paste_view_focus: cx.focus_handle(),
+            paste_view_scroll: gpui::ScrollHandle::new(),
             appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
@@ -6369,6 +6376,36 @@ impl Composer {
         self.staged_comments(cx).len() + self.staged_pasted().len()
     }
 
+    fn close_paste_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_view = None;
+        let focus = self.input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Turn a staged paste back into message text, appended to the draft,
+    /// so it can be edited like anything typed.
+    fn edit_paste_in_message(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.current_key.clone();
+        let Some(slot) = self.pasted.get_mut(&key) else {
+            return;
+        };
+        let Some(at) = slot.iter().position(|paste| paste.id == id) else {
+            return;
+        };
+        let paste = slot.remove(at);
+        self.input.update(cx, |input, cx| {
+            let draft = input.text().trim_end().to_string();
+            let text = if draft.is_empty() {
+                paste.text
+            } else {
+                format!("{draft}\n\n{}", paste.text)
+            };
+            input.set_text(&text, cx);
+        });
+        self.close_paste_view(window, cx);
+    }
+
     fn staged_pasted(&self) -> &[crate::pasted::PastedText] {
         self.pasted
             .get(&self.current_key)
@@ -6406,6 +6443,7 @@ impl Composer {
                     // The staged set is already on screen in the changes
                     // pane, so a hover card would only repeat it.
                     details: Vec::new(),
+                    full: Vec::new(),
                 },
                 theme,
             ));
@@ -6420,7 +6458,18 @@ impl Composer {
                     .flex_row()
                     .items_center()
                     .gap(px(2.0))
-                    .child(crate::badges::render(("composer-paste", ix), &badge, theme))
+                    .child({
+                        let open = paste.id.clone();
+                        crate::badges::render(("composer-paste", ix), &badge, theme)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.paste_view = Some(open.clone());
+                                this.paste_view_scroll = gpui::ScrollHandle::new();
+                                window.focus(&this.paste_view_focus, cx);
+                                cx.notify();
+                            }))
+                    })
                     .child(
                         div()
                             .id(("composer-paste-remove", ix))
@@ -11001,6 +11050,53 @@ impl Render for Composer {
         } else {
             container
         };
+        if let Some(id) = self.paste_view.clone() {
+            match self
+                .staged_pasted()
+                .iter()
+                .find(|paste| paste.id == id)
+                .map(|paste| paste.text.clone())
+            {
+                Some(text) => {
+                    let theme = Theme::of(cx).for_popup();
+                    let edit_id = id.clone();
+                    let actions = vec![
+                        crate::popover::btn_ghost(&theme, "Edit in message", "paste-viewer-edit")
+                            .id("paste-viewer-edit")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.edit_paste_in_message(&edit_id, window, cx);
+                            }))
+                            .into_any_element(),
+                        crate::popover::btn_ghost(&theme, "Remove", "paste-viewer-remove")
+                            .id("paste-viewer-remove")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                let key = this.current_key.clone();
+                                if let Some(slot) = this.pasted.get_mut(&key) {
+                                    slot.retain(|paste| paste.id != id);
+                                }
+                                this.close_paste_view(window, cx);
+                            }))
+                            .into_any_element(),
+                    ];
+                    let weak = cx.weak_entity();
+                    return container.child(crate::pasted::viewer(
+                        window,
+                        &[text.into()],
+                        &self.paste_view_focus,
+                        &self.paste_view_scroll,
+                        actions,
+                        move |window, cx| {
+                            let _ = weak.update(cx, |this, cx| this.close_paste_view(window, cx));
+                        },
+                        cx,
+                    ));
+                }
+                // Sent or removed meanwhile.
+                None => self.paste_view = None,
+            }
+        }
         // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
         if let Some(preview) = self.preview.clone() {
             if std::mem::take(&mut self.preview_focus_pending) {
@@ -12760,6 +12856,34 @@ mod tests {
                 });
                 assert_eq!(composer.input.read(cx).text(), "short");
                 assert_eq!(composer.staged_pasted().len(), 1);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn editing_a_staged_paste_moves_it_into_the_draft(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("summarize this", cx));
+                let paste = crate::pasted::PastedText::new("line one
+line two".into());
+                let id = paste.id.clone();
+                let key = composer.current_key.clone();
+                composer.pasted.insert(key, vec![paste]);
+                composer.paste_view = Some(id.clone());
+                composer.edit_paste_in_message(&id, window, cx);
+                assert_eq!(
+                    composer.input.read(cx).text(),
+                    "summarize this
+
+line one
+line two"
+                );
+                assert!(composer.staged_pasted().is_empty());
+                assert!(composer.paste_view.is_none());
             })
             .unwrap();
     }

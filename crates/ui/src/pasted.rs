@@ -33,6 +33,7 @@ impl PastedText {
             icon: crate::icons::DOCUMENT,
             label: format!("Pasted text · {} chars", grouped(chars)).into(),
             details: vec![detail(0, &self.text)],
+            full: vec![self.text.clone().into()],
         }
     }
 }
@@ -99,8 +100,172 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
             icon: crate::icons::DOCUMENT,
             label: label.into(),
             details,
+            full: blocks
+                .iter()
+                .map(|block| gpui::SharedString::from(block.to_string()))
+                .collect(),
         },
     ))
+}
+
+/// The full-text viewer a paste pill opens: the image lightbox's scrim with
+/// a card holding every paste, scrollable, and a Copy button. `actions` are
+/// the caller's extra buttons (the composer's Edit / Remove). A click on the
+/// scrim or Escape closes it.
+pub fn viewer(
+    window: &mut gpui::Window,
+    texts: &[gpui::SharedString],
+    focus: &gpui::FocusHandle,
+    scroll: &gpui::ScrollHandle,
+    actions: Vec<gpui::AnyElement>,
+    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    use gpui::{div, prelude::*, px};
+    let theme = crate::theme::Theme::of(cx).for_popup();
+    let viewport = window.viewport_size();
+    let width = (f32::from(viewport.width) * 0.9).min(760.0);
+    let height = f32::from(viewport.height) * 0.8;
+    let chars: usize = texts.iter().map(|text| text.chars().count()).sum();
+    let title = match texts.len() {
+        1 => format!("Pasted text · {} chars", grouped(chars)),
+        n => format!("{n} pasted texts · {} chars", grouped(chars)),
+    };
+    let all = texts
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let on_close = std::rc::Rc::new(on_close);
+    let close_on_key = on_close.clone();
+    let close_button = on_close.clone();
+    let body = texts.iter().enumerate().map(|(ix, text)| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .when(texts.len() > 1, |part| {
+                part.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(gpui::SharedString::from(format!(
+                            "Paste {} · {} chars",
+                            ix + 1,
+                            grouped(text.chars().count())
+                        ))),
+                )
+            })
+            .child(div().text_color(theme.text).child(text.clone()))
+    });
+    let header = div()
+        .flex_none()
+        .h(px(44.0))
+        .px(px(14.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .border_b_1()
+        .border_color(crate::theme::hairline(0.08))
+        .child(
+            crate::icons::icon(crate::icons::DOCUMENT)
+                .size(px(14.0))
+                .text_color(theme.text_muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(crate::typography::ui_rems(13.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(gpui::SharedString::from(title)),
+        )
+        .child(
+            crate::popover::btn_ghost(&theme, "Copy", "paste-viewer-copy")
+                .id("paste-viewer-copy")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(all.clone()));
+                }),
+        )
+        .children(actions)
+        .child(
+            div()
+                .id("paste-viewer-close")
+                .size(px(26.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.ink(0.08)))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    close_button(window, cx);
+                })
+                .child(
+                    crate::icons::icon(crate::icons::CLOSE)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                ),
+        );
+    let card = crate::popover::popover_card(&theme)
+        .w(px(width))
+        .max_h(px(height))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        // Clicks inside the card never reach the scrim's close.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(header)
+        .child(
+            div()
+                .id("paste-viewer-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .p(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .line_height(crate::typography::ui_rems(20.0))
+                .children(body),
+        );
+    gpui::deferred(
+        gpui::anchored()
+            .position(gpui::point(px(0.0), px(0.0)))
+            .child(
+                div()
+                    .id("paste-viewer")
+                    .occlude()
+                    .track_focus(focus)
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .bg(crate::popover::scrim_alpha(0.6))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            cx.stop_propagation();
+                            close_on_key(window, cx);
+                        }
+                    })
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_close(window, cx);
+                    })
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(card),
+            ),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 fn preview(text: &str) -> String {
