@@ -12,11 +12,13 @@
 
 use super::*;
 
-const PANEL_WIDTH: f32 = 400.0;
-const PANEL_HEIGHT: f32 = 560.0;
 /// Clears the conversation column's composer below the panel.
 const PANEL_BOTTOM: f32 = 104.0;
 const PANEL_RIGHT: f32 = 16.0;
+const MIN_WIDTH: f32 = 320.0;
+const MIN_HEIGHT: f32 = 300.0;
+/// The resize handles' hit band along the top and left edges.
+const EDGE: f32 = 6.0;
 
 const INSTRUCTIONS: &str = "\
 # General chat
@@ -36,6 +38,57 @@ pub(super) struct ChatPanel {
     /// Minimized panels keep their conversation and draft.
     open: bool,
     _events: Vec<Subscription>,
+}
+
+/// Drag marker for the panel's resize handles.
+pub(super) struct ChatPanelResize;
+
+/// Which edges a resize drag moves. The panel is anchored bottom-right, so
+/// it grows up and to the left.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edges {
+    Top,
+    Left,
+    TopLeft,
+}
+
+/// Size and transient UI that outlive the chat shown in the panel.
+pub(super) struct ChatPanelLayout {
+    width: f32,
+    height: f32,
+    history_open: bool,
+    /// Pointer and size where the current resize began.
+    resize: Option<(Point<f32>, (f32, f32), Edges)>,
+}
+
+impl Default for ChatPanelLayout {
+    fn default() -> Self {
+        Self {
+            width: 400.0,
+            height: 560.0,
+            history_open: false,
+            resize: None,
+        }
+    }
+}
+
+/// A resize sample: the size `anchor` grows to when the pointer moves from
+/// `start` to `at`, within `[MIN, max]`.
+fn resized(
+    start: Point<f32>,
+    from: (f32, f32),
+    edges: Edges,
+    at: Point<f32>,
+    max: (f32, f32),
+) -> (f32, f32) {
+    let (mut width, mut height) = from;
+    if matches!(edges, Edges::Left | Edges::TopLeft) {
+        width = (from.0 + start.x - at.x).clamp(MIN_WIDTH, max.0.max(MIN_WIDTH));
+    }
+    if matches!(edges, Edges::Top | Edges::TopLeft) {
+        height = (from.1 + start.y - at.y).clamp(MIN_HEIGHT, max.1.max(MIN_HEIGHT));
+    }
+    (width, height)
 }
 
 /// Whether `chat` is a general chat (runs in the general-chat folder).
@@ -84,7 +137,11 @@ impl Shell {
                     model_options: serde_json::Map::new(),
                     sandbox: zeron_proto::SandboxLevel::ReadOnly,
                 });
-            (state.data_dir.clone(), state.local_device_id.clone(), config)
+            (
+                state.data_dir.clone(),
+                state.local_device_id.clone(),
+                config,
+            )
         };
         let (Some(data_dir), Some(device_id)) = (data_dir, device) else {
             return;
@@ -120,7 +177,12 @@ impl Shell {
     }
 
     /// Open `chat` in the panel, replacing whatever it showed.
-    fn show_in_chat_panel(&mut self, chat: zeron_proto::Chat, unsaved: bool, cx: &mut Context<Self>) {
+    fn show_in_chat_panel(
+        &mut self,
+        chat: zeron_proto::Chat,
+        unsaved: bool,
+        cx: &mut Context<Self>,
+    ) {
         let chat_id = chat.id.clone();
         let parent = self.state.clone();
         let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
@@ -162,7 +224,76 @@ impl Shell {
             open: true,
             _events: events,
         });
+        self.chat_panel_layout.history_open = false;
         cx.notify();
+    }
+
+    /// The root's drag-move listener for [`ChatPanelResize`].
+    pub(super) fn on_chat_panel_drag(
+        &mut self,
+        event: &gpui::DragMoveEvent<ChatPanelResize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((start, from, edges)) = self.chat_panel_layout.resize else {
+            return;
+        };
+        let at = gpui::point(
+            f32::from(event.event.position.x),
+            f32::from(event.event.position.y),
+        );
+        let viewport = window.viewport_size();
+        let max = (
+            f32::from(viewport.width) - 160.0,
+            f32::from(viewport.height) - PANEL_BOTTOM - Theme::TITLEBAR_HEIGHT - 24.0,
+        );
+        let (width, height) = resized(start, from, edges, at, max);
+        self.chat_panel_layout.width = width;
+        self.chat_panel_layout.height = height;
+        cx.notify();
+    }
+
+    fn chat_panel_resize_handle(
+        &self,
+        edges: Edges,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (id, cursor) = match edges {
+            Edges::Top => ("chat-panel-resize-top", gpui::CursorStyle::ResizeUpDown),
+            Edges::Left => ("chat-panel-resize-left", gpui::CursorStyle::ResizeLeftRight),
+            Edges::TopLeft => (
+                "chat-panel-resize-corner",
+                gpui::CursorStyle::ResizeUpLeftDownRight,
+            ),
+        };
+        let handle = div().id(id).absolute().cursor(cursor);
+        let handle = match edges {
+            Edges::Top => handle.top_0().left(px(EDGE * 2.0)).right_0().h(px(EDGE)),
+            Edges::Left => handle.left_0().top(px(EDGE * 2.0)).bottom_0().w(px(EDGE)),
+            Edges::TopLeft => handle.top_0().left_0().size(px(EDGE * 2.0)),
+        };
+        handle
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let layout = &mut this.chat_panel_layout;
+                    let at = gpui::point(f32::from(event.position.x), f32::from(event.position.y));
+                    layout.resize = Some((at, (layout.width, layout.height), edges));
+                }),
+            )
+            .on_drag(ChatPanelResize, |_, _: Point<gpui::Pixels>, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| DragGhost)
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.chat_panel_layout.resize = None),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.chat_panel_layout.resize = None),
+            )
     }
 
     /// Reopen an earlier general chat in the panel.
@@ -188,7 +319,8 @@ impl Shell {
             .iter()
             .filter(|chat| !chat.archived && is_general_chat(chat))
             .collect();
-        chats.sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
+        chats
+            .sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
         chats
             .into_iter()
             .take(12)
@@ -282,46 +414,64 @@ impl Shell {
         let panel = self.chat_panel.as_ref().filter(|panel| panel.open)?;
         let (transcript, composer) = (panel.transcript.clone(), panel.composer.clone());
         let theme = Theme::of(cx).for_popup();
+        let (width, height) = (self.chat_panel_layout.width, self.chat_panel_layout.height);
         composer.update(cx, |composer, cx| {
             composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
-            composer.set_available_width(PANEL_WIDTH - 2.0 * Theme::SPACE_SM, cx);
+            composer.set_available_width(width - 2.0 * Theme::SPACE_SM, cx);
         });
-        let recent = self.recent_general_chats(cx);
         let current = panel.state.read(cx).selected_chat.clone();
-        let history = (!recent.is_empty()).then(|| {
+        let title: SharedString = panel
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.title.clone())
+            .map(|title| transcript::single_line(&title))
+            .unwrap_or_else(|| "New chat".into())
+            .into();
+        let recent = self.recent_general_chats(cx);
+        let history = (self.chat_panel_layout.history_open && !recent.is_empty()).then(|| {
             let rows = recent.into_iter().map(|(id, title)| {
                 let selected = current.as_deref() == Some(id.as_str());
                 div()
                     .id(SharedString::from(format!("chat-panel-recent-{id}")))
-                    .h(px(24.0))
+                    .h(px(28.0))
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .items_center()
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(if selected { theme.text } else { theme.text_muted })
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(if selected {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
                     .when(selected, |row| row.bg(theme.ink(0.06)))
-                    .hover(|style| style.bg(theme.ink(0.08)))
+                    .hover(|style| style.bg(theme.ink(0.08)).text_color(theme.text))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_general_chat(&id, cx)))
                     .child(div().min_w_0().truncate().child(title))
             });
-            div()
-                .flex_none()
-                .max_h(px(120.0))
-                .overflow_hidden()
-                .px(px(Theme::SPACE_XS))
-                .pb(px(Theme::SPACE_XS))
-                .border_b_1()
-                .border_color(crate::theme::hairline(0.08))
+            crate::popover::popover_card(&theme)
+                .id("chat-panel-history")
+                .absolute()
+                .top(px(40.0))
+                .left(px(Theme::SPACE_SM))
+                .right(px(Theme::SPACE_SM))
+                .max_h(px(260.0))
+                .overflow_y_scroll()
+                .p(px(Theme::SPACE_XS))
                 .flex()
                 .flex_col()
+                .occlude()
+                .child(crate::popover::menu_heading(&theme, "Recent chats"))
                 .children(rows)
         });
+        let history_active = self.chat_panel_layout.history_open;
         let header = div()
             .flex_none()
             .h(px(36.0))
-            .px(px(Theme::SPACE_SM))
+            .pl(px(Theme::SPACE_SM + 2.0))
+            .pr(px(Theme::SPACE_XS))
             .flex()
             .flex_row()
             .items_center()
@@ -331,16 +481,33 @@ impl Shell {
             .child(
                 icon(icons::CHAT_ROUND_LINE)
                     .size(px(14.0))
+                    .flex_none()
                     .text_color(theme.text_muted),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .pl(px(6.0))
+                    .truncate()
                     .text_size(crate::typography::ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(SharedString::from("Chat")),
+                    .child(title),
+            )
+            .child(
+                self.panel_button(
+                    "chat-panel-history-button",
+                    icons::CLOCK_CIRCLE,
+                    "Recent chats",
+                    &theme,
+                    |this, cx| {
+                        this.chat_panel_layout.history_open = !this.chat_panel_layout.history_open;
+                        cx.notify();
+                    },
+                    cx,
+                )
+                .when(history_active, |button| button.bg(theme.ink(0.08))),
             )
             .child(self.panel_button(
                 "chat-panel-new",
@@ -380,8 +547,8 @@ impl Shell {
                 .absolute()
                 .right(px(PANEL_RIGHT))
                 .bottom(px(PANEL_BOTTOM))
-                .w(px(PANEL_WIDTH))
-                .h(px(PANEL_HEIGHT))
+                .w(px(width))
+                .h(px(height))
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -393,7 +560,6 @@ impl Shell {
                 // underneath.
                 .occlude()
                 .child(header)
-                .children(history)
                 .child(
                     div()
                         .flex_1()
@@ -402,6 +568,10 @@ impl Shell {
                         .child(div().size_full().child(transcript)),
                 )
                 .child(div().flex_none().child(composer))
+                .children(history)
+                .child(self.chat_panel_resize_handle(Edges::Top, cx))
+                .child(self.chat_panel_resize_handle(Edges::Left, cx))
+                .child(self.chat_panel_resize_handle(Edges::TopLeft, cx))
                 .into_any_element(),
         )
     }
@@ -412,6 +582,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resizing_grows_up_and_left_within_bounds() {
+        let start = gpui::point(500.0, 300.0);
+        let from = (400.0, 560.0);
+        let max = (900.0, 700.0);
+        assert_eq!(
+            resized(start, from, Edges::TopLeft, gpui::point(400.0, 250.0), max),
+            (500.0, 610.0)
+        );
+        assert_eq!(
+            resized(start, from, Edges::Top, gpui::point(400.0, 250.0), max),
+            (400.0, 610.0)
+        );
+        assert_eq!(
+            resized(start, from, Edges::Left, gpui::point(900.0, 900.0), max),
+            (MIN_WIDTH, 560.0)
+        );
+        assert_eq!(
+            resized(
+                start,
+                from,
+                Edges::TopLeft,
+                gpui::point(-2000.0, -2000.0),
+                max
+            ),
+            max
+        );
+    }
+
+    #[test]
     fn general_chats_are_told_apart_by_their_folder() {
         let chat = |cwd: Option<&str>| -> zeron_proto::Chat {
             serde_json::from_value(serde_json::json!({
@@ -420,8 +619,12 @@ mod tests {
             }))
             .unwrap()
         };
-        assert!(is_general_chat(&chat(Some(r"C:\Users\me\AppData\Local\Zeron\general-chat"))));
-        assert!(is_general_chat(&chat(Some("/home/me/.zeron/general-chat/"))));
+        assert!(is_general_chat(&chat(Some(
+            r"C:\Users\me\AppData\Local\Zeron\general-chat"
+        ))));
+        assert!(is_general_chat(&chat(Some(
+            "/home/me/.zeron/general-chat/"
+        ))));
         assert!(!is_general_chat(&chat(Some(r"C:\code\general-chat-app"))));
         assert!(!is_general_chat(&chat(None)));
     }
@@ -433,6 +636,9 @@ mod tests {
         assert!(general.join("AGENTS.md").is_file());
         std::fs::write(general.join("CLAUDE.md"), "mine").unwrap();
         ensure_general_dir(dir.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(general.join("CLAUDE.md")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(general.join("CLAUDE.md")).unwrap(),
+            "mine"
+        );
     }
 }

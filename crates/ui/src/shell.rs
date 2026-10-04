@@ -1896,6 +1896,7 @@ pub struct Shell {
     side_chat_creating: bool,
     /// The floating Chat panel (see [`chat_panel`]).
     chat_panel: Option<chat_panel::ChatPanel>,
+    chat_panel_layout: chat_panel::ChatPanelLayout,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2352,6 +2353,7 @@ impl Shell {
             side_chat_seq: 0,
             side_chat_creating: false,
             chat_panel: None,
+            chat_panel_layout: Default::default(),
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -12657,6 +12659,7 @@ impl Render for Shell {
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
             .on_drag_move(cx.listener(Self::on_files_panel_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
+            .on_drag_move(cx.listener(Self::on_chat_panel_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
