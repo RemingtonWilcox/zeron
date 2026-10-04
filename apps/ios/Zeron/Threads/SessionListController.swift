@@ -21,6 +21,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var reorderable = false
     /// The Archived list: rows offer Unarchive instead of Archive / Pin / Move.
     var archivedRows = false
+    /// Rows offer Pin and Move to Section (not the Chat tab's chats).
+    var organizable = true
     /// The session open beside this list (iPad sidebar): drawn as current.
     var currentChatId: String? {
         didSet {
@@ -222,7 +224,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard !archivedRows, organizable, let id = sessionId(path), let vm = sessions[id] else { return nil }
         let pin = UIContextualAction(style: .normal, title: vm.pinned ? "Unpin" : "Pin") { [weak self] _, _, done in
             self?.app.setPinned(id, !vm.pinned)
             done(true)
@@ -249,6 +251,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         archive.image = UIImage(systemName: "archivebox.fill")
         archive.backgroundColor = Palette.secondary
+        guard organizable else { return UISwipeActionsConfiguration(actions: [archive]) }
         let move = UIContextualAction(style: .normal, title: "Move") { [weak self] _, view, done in
             self?.presentMoveMenu(id, from: view)
             done(true)
@@ -271,12 +274,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 ])
             }
-            return UIMenu(children: [
-                UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
-                self.moveMenu(id),
+            let common: [UIMenuElement] = [
                 UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },
-            ])
+            ]
+            guard self.organizable else { return UIMenu(children: common) }
+            let organize: [UIMenuElement] = [
+                UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
+                self.moveMenu(id),
+            ]
+            return UIMenu(children: organize + common)
         }
     }
 

@@ -24,6 +24,9 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         let sessions = UITab(title: "Sessions", image: UIImage(named: "tab-chat"), identifier: "sessions") { [app] _ in
             Self.nav(SessionsViewController(app: app))
         }
+        let chat = UITab(title: "Chat", image: UIImage(systemName: "bubble.left.and.text.bubble.right"), identifier: "chat") { [app] _ in
+            Self.nav(ChatsViewController(app: app))
+        }
         let more = UITab(title: "Settings", image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in
             Self.nav(MoreViewController(app: app))
         }
@@ -31,7 +34,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
             Self.nav(SearchViewController(app: app))
         }
         search.automaticallyActivatesSearch = true
-        tabs = [sessions, more, search]
+        tabs = [sessions, chat, more, search]
         selectedTab = sessions
 
         bottomAccessory = accessory
@@ -60,14 +63,19 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         }
     }
 
-    private lazy var accessoryContent = AskAnythingAccessory { [weak self] in self?.presentNewSession() }
+    private lazy var accessoryContent = AskAnythingAccessory { [weak self] in
+        guard let self else { return }
+        self.onChatTab ? self.presentNewChat() : self.presentNewSession()
+    }
     private lazy var accessory = UITabAccessory(contentView: accessoryContent)
     private var liveToken: AnyObject?
+    private var onChatTab: Bool { selectedTab?.identifier == "chat" }
 
     /// Accessory state from what's on screen: hidden over a session (it has
-    /// its own composer).
+    /// its own composer); "New chat" on the Chat tab.
     func syncAccessory(animated: Bool = false) {
         let top = (selectedTab?.viewController as? UINavigationController)?.topViewController
+        accessoryContent.title = onChatTab ? "New chat" : "New session"
         setAccessoryVisible(!(top is SessionViewController), animated: animated)
     }
 
@@ -114,10 +122,25 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     }
 
     func presentNewSession(prompt: String? = nil) {
-        let vc = NewSessionViewController(app: app, prompt: prompt) { [weak self] chatId, handoff in
-            guard let self else { return }
-            self.openSession(chatId, handoff: handoff)
+        presentSheet(NewSessionViewController(app: app, prompt: prompt) { [weak self] chatId, handoff in
+            self?.openSession(chatId, handoff: handoff)
+        })
+    }
+
+    /// A general chat in the desktop Chat panel's folder. Until the desktop
+    /// has made one, the phone doesn't know that folder: say so.
+    func presentNewChat() {
+        guard let home = app.generalHome else {
+            let alert = UIAlertController(title: "Start on your desktop", message: "Send one message from the Chat panel in Zeron on your desktop. After that, you can start chats from here.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            return present(alert, animated: true)
         }
+        presentSheet(NewSessionViewController(app: app, prompt: nil, general: home) { [weak self] chatId, handoff in
+            self?.openSession(chatId, handoff: handoff)
+        })
+    }
+
+    private func presentSheet(_ vc: UIViewController) {
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .pageSheet
         if let sheet = nav.sheetPresentationController {
@@ -139,8 +162,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     /// the sheet leaves without its slide, and the handoff animation carries
     /// the draft (page, composer, message) into the chat.
     func openSession(_ chatId: String, handoff: DraftHandoff?) {
-        guard let handoff, let window = view.window,
-              let tab = tabs.first(where: { $0.identifier == "sessions" })
+        guard let handoff, let window = view.window, let tab = homeTab(chatId)
         else { return openSession(chatId) }
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return openSession(chatId) }
@@ -175,10 +197,16 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         nav.popToRootViewController(animated: false)
     }
 
-    /// Push a session on the Sessions tab (from new-session, deep links, search).
+    /// The tab a chat opens on: Chat for general chats, else Sessions.
+    private func homeTab(_ chatId: String) -> UITab? {
+        let id = AppModel.isGeneralChat(app.row(chatId)?.cwd) ? "chat" : "sessions"
+        return tabs.first { $0.identifier == id }
+    }
+
+    /// Push a session on its tab (from new-session, deep links, search).
     func openSession(_ chatId: String) {
         if presentedViewController != nil { dismiss(animated: true) }
-        guard let tab = tabs.first(where: { $0.identifier == "sessions" }) else { return }
+        guard let tab = homeTab(chatId) else { return }
         selectedTab = tab
         guard let nav = tab.viewController as? UINavigationController else { return }
         nav.popToRootViewController(animated: false)
@@ -195,6 +223,15 @@ final class AskAnythingAccessory: UIControl {
     private let summary = UILabel()
     private let cells = StatusGlyph()
     private let mark = UIImageView(image: UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)))
+    private var live = AppModel.LiveCounts()
+    /// "New session", or "New chat" on the Chat tab.
+    var title = "New session" {
+        didSet {
+            guard title != oldValue else { return }
+            label.text = title
+            update(live)
+        }
+    }
 
     init(onTap: @escaping () -> Void) {
         self.onTap = onTap
@@ -250,13 +287,14 @@ final class AskAnythingAccessory: UIControl {
     required init?(coder: NSCoder) { fatalError() }
 
     func update(_ live: AppModel.LiveCounts) {
+        self.live = live
         var parts: [String] = []
         if live.working > 0 { parts.append("\(live.working) working") }
         if live.awaiting > 0 { parts.append("\(live.awaiting) need\(live.awaiting == 1 ? "s" : "") you") }
         summary.text = parts.joined(separator: " · ")
         cells.isHidden = parts.isEmpty
         cells.kind = live.working > 0 ? .spinner : .dot(StatusTone.input)
-        accessibilityLabel = parts.isEmpty ? "New session" : "New session, " + parts.joined(separator: ", ")
+        accessibilityLabel = parts.isEmpty ? title : title + ", " + parts.joined(separator: ", ")
     }
 
     override var isHighlighted: Bool {

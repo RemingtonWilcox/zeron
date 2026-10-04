@@ -62,13 +62,25 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     /// only when opened on purpose (not the launch page).
     var focusOnAppear: Bool
 
-    init(app: AppModel, prompt: String?, embedded: Bool = false, onCreated: @escaping (String, DraftHandoff?) -> Void) {
+    /// Set for a general chat (Chat tab): it runs in the desktop's
+    /// general-chat folder, so only the model is picked.
+    private let general: GeneralChatHome?
+
+    init(app: AppModel, prompt: String?, embedded: Bool = false, general: GeneralChatHome? = nil, onCreated: @escaping (String, DraftHandoff?) -> Void) {
         self.app = app
         self.embedded = embedded
         self.focusOnAppear = !embedded
+        self.general = general
         self.onCreated = onCreated
         self.draft = app.lastDraft
         super.init(nibName: nil, bundle: nil)
+        if let general {
+            draft.projectId = nil
+            draft.hostId = general.deviceId
+            draft.worktree = false
+            composer.text = prompt ?? ""
+            return
+        }
         // Pick up where the page was left (closed without sending).
         composer.text = prompt ?? app.newSessionText
         composer.images = app.newSessionImages
@@ -80,7 +92,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
     /// Closed (swipe down, ✕, or replaced in the iPad column) without
     /// sending: keep what was typed and picked for next time.
     private func rememberDraft() {
-        guard !created else { return }
+        guard !created, general == nil else { return }
         app.lastDraft = draft
         app.newSessionText = composer.text
         app.newSessionImages = composer.images
@@ -105,7 +117,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         dismissTap.delegate = self
         view.addGestureRecognizer(dismissTap)
         view.backgroundColor = Palette.background
-        title = "New Session"
+        title = general == nil ? "New Session" : "New Chat"
         if !embedded {
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
                 self?.dismiss(animated: true)
@@ -115,7 +127,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
         mark.tintColor = Palette.text
         mark.contentMode = .center
-        hero.text = "What are we building?"
+        hero.text = general == nil ? "What are we building?" : "What's on your mind?"
         hero.numberOfLines = 2
         hero.font = Fonts.ui(.sansSemibold, 22)
         hero.textColor = Palette.text
@@ -129,7 +141,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         view.addSubview(heroStack)
 
         composer.translatesAutoresizingMaskIntoConstraints = false
-        composer.placeholder = "Describe the task"
+        composer.placeholder = general == nil ? "Describe the task" : "Ask anything"
         composer.chipsAlwaysVisible = true
         composer.attachMenu = { [weak self] in
             guard let self else { return UIMenu() }
@@ -238,7 +250,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             if p.git {
                 chips.append(ComposerChip(id: "branch", title: draft.worktree ? "New worktree" : (draft.branch ?? "Current branch"), symbol: nil, icon: BranchIcon.sized()))
             }
-        } else {
+        } else if general == nil {
             let host = app.hostOptions.first { $0.id == draft.hostId }
             chips.append(ComposerChip(id: "project", title: "No project", symbol: "tray"))
             chips.append(ComposerChip(id: "host", title: host?.name ?? "Choose host", symbol: "desktopcomputer"))
@@ -354,17 +366,26 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     /// False when the session couldn't be created (the prompt stays put).
     private func create(text: String, images: [StagedImage]) -> Bool {
-        app.lastDraft = draft
-        guard let chatId = app.createSession(draft: draft, text: text, images: images) else {
-            let alert = UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
+        if general == nil {
+            app.lastDraft = draft
+        } else {
+            // A chat's model pick carries over; its folder and host don't.
+            (app.lastDraft.harness, app.lastDraft.model, app.lastDraft.effort) = (draft.harness, draft.model, draft.effort)
+        }
+        guard let chatId = app.createSession(draft: draft, text: text, images: images, general: general) else {
+            let alert = general == nil
+                ? UIAlertController(title: "Couldn't start the session", message: "Choose a project or a host that can run it.", preferredStyle: .alert)
+                : UIAlertController(title: "Couldn't start the chat", message: "Zeron couldn't start it on the desktop that hosts your chats.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
             return false
         }
         created = true
         PushNotifications.shared.askAfterFirstSession()
-        app.newSessionText = ""
-        app.newSessionImages = []
+        if general == nil {
+            app.newSessionText = ""
+            app.newSessionImages = []
+        }
         // Lift the draft out (page + composer + typed text) so the chat can
         // take over in one motion.
         onCreated(chatId, DraftHandoff.capture(from: self, composer: composer, text: text))

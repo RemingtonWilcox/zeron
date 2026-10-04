@@ -20,6 +20,12 @@ final class AppModel {
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
+    /// General chats (the desktop Chat panel's), newest first. They live in
+    /// the Chat tab, not the Sessions list.
+    private(set) var generalChats: [SessionRowVM] = []
+    /// Where a new general chat runs: the desktop's general-chat folder, read
+    /// off its chats (nil until the desktop has made one).
+    private(set) var generalHome: GeneralChatHome?
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
@@ -217,6 +223,8 @@ final class AppModel {
         // Nothing of the account stays in memory.
         frontPage = FrontPage()
         archived = []
+        generalChats = []
+        generalHome = nil
         rows = [:]
         rawProjects = []
         lastHosts = []
@@ -318,18 +326,35 @@ final class AppModel {
             all[r.id] = r
             return Self.vm(r)
         }
+        // General chats leave the front page for the Chat tab.
+        var general: [String: SessionRow] = [:]
+        func front(_ list: [SessionRow]) -> [SessionRowVM] {
+            list.filter { r in
+                guard Self.isGeneralChat(r.cwd) else { return true }
+                general[r.id] = r
+                all[r.id] = r
+                return false
+            }.map(vm)
+        }
         var page = FrontPage()
-        let pinned = ws.front.pinned.map(vm)
+        let pinned = front(ws.front.pinned)
         if !pinned.isEmpty {
             page.folders.append(FolderRowVM(id: "pinned", name: "Pinned", count: pinned.count, symbol: "pin"))
         }
         page.sectionSessions["pinned"] = pinned
         for s in ws.front.sections {
-            let list = s.sessions.map(vm)
+            let list = front(s.sessions)
             page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder"))
             page.sectionSessions[s.id] = list
         }
-        page.sessions = ws.front.recent.map(vm)
+        page.sessions = front(ws.front.recent)
+        let generalRows = general.values.sorted { $0.lastActivityMs > $1.lastActivityMs }
+        let generalVMs = generalRows.map(Self.vm)
+        // The folder comes from the newest chat whose desktop is online.
+        let homes = generalRows + ws.archived.filter { Self.isGeneralChat($0.cwd) }
+        let home = (homes.first(where: \.deviceOnline) ?? homes.first).flatMap { r in
+            r.cwd.map { GeneralChatHome(deviceId: r.deviceId, cwd: $0) }
+        }
         rawProjects = ws.projects
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
@@ -346,10 +371,13 @@ final class AppModel {
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+            || generalVMs != generalChats || home != generalHome
         lastHosts = hosts
         live = counts
         frontPage = page
         archived = archivedVMs
+        generalChats = generalVMs
+        generalHome = home
         if changed { observers.values.forEach { $0() } }
     }
 
@@ -528,21 +556,26 @@ final class AppModel {
     }
 
     /// Create the chat, open it, and send the first message.
-    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
+    /// `general`: a general chat in the desktop's folder, read-only like the
+    /// desktop Chat panel's.
+    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage], general: GeneralChatHome? = nil) -> String? {
         guard let client else { return nil }
         let target: SessionTarget
-        if let p = draft.projectId {
+        if let general {
+            target = .projectless(deviceId: general.deviceId)
+        } else if let p = draft.projectId {
             target = .project(spaceId: p)
         } else if let h = draft.hostId {
             target = .projectless(deviceId: h)
         } else {
             return nil
         }
-        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
+        let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: general == nil ? .workspaceWrite : .readOnly)
+        let branch = general != nil || draft.worktree ? nil : draft.branch
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: branch, cwd: general?.cwd, title: nil))
             let handle = try client.openSession(chatId: chatId)
-            let project = rawProjects.first { $0.id == draft.projectId }
+            let project = general == nil ? rawProjects.first { $0.id == draft.projectId } : nil
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
             refreshWorkspace()
@@ -551,6 +584,21 @@ final class AppModel {
             NSLog("create session failed: \(error)")
             return nil
         }
+    }
+}
+
+/// The desktop's general-chat folder and the device it's on.
+struct GeneralChatHome: Equatable {
+    let deviceId: String
+    let cwd: String
+}
+
+extension AppModel {
+    /// Whether a chat runs in a general-chat folder (the desktop Chat
+    /// panel's `{data_dir}/general-chat`), on either path separator.
+    static func isGeneralChat(_ cwd: String?) -> Bool {
+        guard let cwd else { return false }
+        return cwd.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last == "general-chat"
     }
 }
 
