@@ -43,7 +43,8 @@ pub enum SessionTarget {
     /// In a project: host = the project's owning device, cwd = its folder
     /// (or `cwd` override, e.g. a picked worktree).
     Project { space_id: String },
-    /// No project: runs in the chosen host's home folder (`~`).
+    /// No project: runs in the chosen host's home folder (`~`), or in `cwd`
+    /// when given (e.g. the desktop's general-chat folder).
     Projectless { device_id: String },
 }
 
@@ -53,7 +54,8 @@ pub struct NewSession {
     pub config: Option<ChatConfig>,
     /// Branch to stamp from the first frame (picked ref).
     pub branch: Option<String>,
-    /// Checkout override (an existing worktree's path).
+    /// Checkout override (an existing worktree's path), or a project-less
+    /// session's folder on its host.
     pub cwd: Option<String>,
     pub title: Option<String>,
 }
@@ -736,7 +738,11 @@ impl Client {
                         "that device can't host sessions".into(),
                     ));
                 }
-                (device_id.clone(), None, "~".to_owned())
+                (
+                    device_id.clone(),
+                    None,
+                    new.cwd.clone().unwrap_or_else(|| "~".to_owned()),
+                )
             }
         };
         let now = Utc::now();
