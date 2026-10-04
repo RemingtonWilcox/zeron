@@ -6423,7 +6423,13 @@ impl Composer {
 
     fn render_comments_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let count = self.staged_comments(cx).len();
-        let pasted = self.staged_pasted().to_vec();
+        // Labels and previews only: a staged paste can be a whole log, and
+        // its text isn't needed to draw the chip.
+        let pasted: Vec<(String, crate::badges::MessageBadge)> = self
+            .staged_pasted()
+            .iter()
+            .map(|paste| (paste.id.clone(), paste.badge()))
+            .collect();
         if count == 0 && pasted.is_empty() {
             return None;
         }
@@ -6448,9 +6454,7 @@ impl Composer {
                 theme,
             ));
         }
-        for (ix, paste) in pasted.into_iter().enumerate() {
-            let badge = paste.badge();
-            let id = paste.id.clone();
+        for (ix, (id, badge)) in pasted.into_iter().enumerate() {
             strip = strip.child(
                 div()
                     .flex_none()
@@ -6459,7 +6463,7 @@ impl Composer {
                     .items_center()
                     .gap(px(2.0))
                     .child({
-                        let open = paste.id.clone();
+                        let open = id.clone();
                         crate::badges::render(("composer-paste", ix), &badge, theme)
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -8979,9 +8983,7 @@ impl Composer {
                         let slot = composer.pasted.entry(restore_key.clone()).or_default();
                         slot.splice(0..0, pasted.iter().cloned());
                     }
-                    if !restore_on_failure {
-                        // A resend: the composer holds the user's own draft.
-                    } else if is_new && composer.current_key != restore_key {
+                    if is_new && composer.current_key != restore_key {
                         // A re-key swap to the canvas is pending (the
                         // select_chat(None) above); it loads this draft into
                         // the input on flush — setting the input directly

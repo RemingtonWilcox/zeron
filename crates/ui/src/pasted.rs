@@ -16,32 +16,35 @@ const PREVIEW_CHARS: usize = 280;
 pub struct PastedText {
     pub id: String,
     pub text: String,
+    /// Counted once; the chip shows it every frame.
+    chars: usize,
 }
 
 impl PastedText {
     pub fn new(text: String) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            chars: text.chars().count(),
             text,
         }
     }
 
     /// The composer's chip for this paste, with its preview card.
     pub fn badge(&self) -> crate::badges::MessageBadge {
-        let chars = self.text.chars().count();
         crate::badges::MessageBadge {
             icon: crate::icons::DOCUMENT,
-            label: format!("Pasted text · {} chars", grouped(chars)).into(),
-            details: vec![detail(0, &self.text)],
-            full: vec![self.text.clone().into()],
+            label: format!("Pasted text · {} chars", grouped(self.chars)).into(),
+            details: vec![detail(0, &self.text, self.chars)],
+            // The composer opens its own viewer by paste id.
+            full: Vec::new(),
         }
     }
 }
 
-fn detail(ix: usize, text: &str) -> crate::badges::BadgeDetail {
+fn detail(ix: usize, text: &str, chars: usize) -> crate::badges::BadgeDetail {
     crate::badges::BadgeDetail {
         location: format!("Paste {}", ix + 1).into(),
-        tag: Some(format!("{} chars", grouped(text.chars().count())).into()),
+        tag: Some(format!("{} chars", grouped(chars)).into()),
         body: preview(text).into(),
     }
 }
@@ -91,7 +94,7 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
     let details = blocks
         .iter()
         .enumerate()
-        .map(|(ix, block)| detail(ix, block))
+        .map(|(ix, block)| detail(ix, block, block.chars().count()))
         .collect();
     let rest = if rest == ONLY_TEXT { "" } else { rest };
     Some((
@@ -268,6 +271,11 @@ pub fn viewer(
     .into_any_element()
 }
 
+/// `12400` → `12,400`.
+fn grouped(n: usize) -> String {
+    crate::context_usage::with_separators(n as u64)
+}
+
 fn preview(text: &str) -> String {
     let mut chars = text.chars();
     let head: String = chars.by_ref().take(PREVIEW_CHARS).collect();
@@ -278,28 +286,12 @@ fn preview(text: &str) -> String {
     }
 }
 
-/// `12400` → `12,400`.
-fn grouped(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (ix, digit) in digits.chars().enumerate() {
-        if ix > 0 && (digits.len() - ix) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(digit);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn paste(text: &str) -> PastedText {
-        PastedText {
-            id: "p".into(),
-            text: text.into(),
-        }
+        PastedText::new(text.into())
     }
 
     #[test]
@@ -339,7 +331,5 @@ mod tests {
         assert!(extract_badge("talking about </pasted-text>").is_none());
         assert!(!is_long(&"y".repeat(MIN_CHARS - 1)));
         assert!(is_long(&"y".repeat(MIN_CHARS)));
-        assert_eq!(grouped(999), "999");
-        assert_eq!(grouped(1_234_567), "1,234,567");
     }
 }
