@@ -1465,10 +1465,15 @@ impl Inner {
     }
 
     /// Every harness session id the chat's journal names, oldest first, each
-    /// with the cwd of the `SessionStarted` that governs it.
+    /// with the cwd of the `SessionStarted` that governs it. `Done.session_id`
+    /// inherits the cwd of the most recent `SessionStarted` (same run).
     fn journal_harness_sessions(&self, chat_id: &str) -> Vec<(String, String)> {
-        let Ok(events) = self.journal.replay(chat_id, 0) else {
-            return Vec::new();
+        let events = match self.journal.replay(chat_id, 0) {
+            Ok(events) => events,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
+                return Vec::new();
+            }
         };
         let mut cwd = String::new();
         let mut sessions = Vec::new();
@@ -1494,39 +1499,9 @@ impl Inner {
         sessions
     }
 
-    /// The last harness session id named anywhere in the chat's journal, with
-    /// the cwd of the `SessionStarted` that governs it. `Done.session_id`
-    /// inherits the cwd of the most recent `SessionStarted` (same run).
+    /// The last of [`Self::journal_harness_sessions`].
     fn journal_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
-        let events = match self.journal.replay(chat_id, 0) {
-            Ok(events) => events,
-            Err(err) => {
-                tracing::warn!(chat = %chat_id, error = %err, "journal scan for harness session failed");
-                return None;
-            }
-        };
-        let mut current_cwd = String::new();
-        let mut found: Option<(String, String)> = None;
-        for (_, event) in events {
-            match event {
-                AgentEvent::SessionStarted {
-                    session_id, cwd, ..
-                } => {
-                    current_cwd = cwd;
-                    if !session_id.is_empty() {
-                        found = Some((session_id, current_cwd.clone()));
-                    }
-                }
-                AgentEvent::Done {
-                    session_id: Some(session_id),
-                    ..
-                } if !session_id.is_empty() => {
-                    found = Some((session_id, current_cwd.clone()));
-                }
-                _ => {}
-            }
-        }
-        found
+        self.journal_harness_sessions(chat_id).pop()
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
@@ -3141,9 +3116,10 @@ async fn drive_run(
         // The CLI may still be flushing its last transcript lines.
         let inner = inner.clone();
         let chat_id = chat_id.clone();
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            inner.count_token_usage(&chat_id, false);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ =
+                tokio::task::spawn_blocking(move || inner.count_token_usage(&chat_id, false)).await;
         });
     }
     // A Stop cancels the messages it found waiting; one accepted after it
