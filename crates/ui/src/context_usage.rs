@@ -165,16 +165,63 @@ fn compact(count: u64) -> String {
     }
 }
 
-/// The chat's running bill: every provider session it used, cache included.
-fn chat_details(usage: ChatTokenUsage) -> String {
-    format!(
-        "{} tokens\n{} in · {} out\n{} cache read · {} cache write",
-        compact(usage.total()),
-        compact(usage.input),
-        compact(usage.output),
-        compact(usage.cache_read),
-        compact(usage.cache_write),
-    )
+/// The chat's running bill, in the providers' own terms: every provider
+/// session it used, cache included.
+fn chat_rows(usage: ChatTokenUsage) -> [(&'static str, String); 5] {
+    [
+        ("Total", compact(usage.total())),
+        ("Output", compact(usage.output)),
+        ("Input", compact(usage.input)),
+        ("Cache read", compact(usage.cache_read)),
+        ("Cache write", compact(usage.cache_write)),
+    ]
+}
+
+/// Why a long chat's total dwarfs what was written: every step re-sends the
+/// conversation, served from the provider's cache.
+fn cache_note(usage: ChatTokenUsage) -> Option<&'static str> {
+    (usage.total() > 0 && usage.cache_read >= usage.total() / 5 * 4)
+        .then_some("Mostly cache reads: each step re-reads the conversation.")
+}
+
+fn usage_table(usage: ChatTokenUsage, theme: &Theme) -> gpui::Div {
+    let rows = chat_rows(usage)
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (label, value))| {
+            div()
+                .flex()
+                .flex_row()
+                .justify_between()
+                .gap(px(24.0))
+                .text_color(if ix == 0 {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .child(SharedString::from(label))
+                .child(SharedString::from(value))
+        });
+    div()
+        .px(px(8.0))
+        .pb(px(6.0))
+        .min_w(px(200.0))
+        .flex()
+        .flex_col()
+        .text_size(px(12.0))
+        .line_height(px(19.0))
+        .whitespace_nowrap()
+        .children(rows)
+        .when_some(cache_note(usage), |table, note| {
+            table.child(
+                div()
+                    .pt(px(4.0))
+                    .text_size(px(11.0))
+                    .line_height(px(15.0))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(SharedString::from(note)),
+            )
+        })
 }
 
 fn section(theme: &Theme, text: String) -> gpui::Div {
@@ -190,16 +237,23 @@ fn section(theme: &Theme, text: String) -> gpui::Div {
 
 /// The context ring's popover content: the window now, then what the chat
 /// has used so far when its host has counted it.
-pub fn card(usage: Option<ContextUsage>, tokens: Option<ChatTokenUsage>, theme: &Theme) -> gpui::Div {
+pub fn card(
+    usage: Option<ContextUsage>,
+    tokens: Option<ChatTokenUsage>,
+    theme: &Theme,
+) -> gpui::Div {
     crate::popover::popover_card(theme)
         .flex()
         .flex_col()
         .child(crate::popover::menu_heading(theme, "Context window"))
         .child(section(theme, details(usage)))
-        .when_some(tokens.filter(|tokens| tokens.total() > 0), |card, tokens| {
-            card.child(crate::popover::menu_heading(theme, "This chat"))
-                .child(section(theme, chat_details(tokens)))
-        })
+        .when_some(
+            tokens.filter(|tokens| tokens.total() > 0),
+            |card, tokens| {
+                card.child(crate::popover::menu_heading(theme, "This chat"))
+                    .child(usage_table(tokens, theme))
+            },
+        )
 }
 
 #[cfg(test)]
@@ -219,11 +273,21 @@ mod tests {
             cache_write: 80_000,
         };
         assert_eq!(
-            chat_details(usage),
-            "5.1M tokens
-1,200 in · 34.0K out
-5.0M cache read · 80.0K cache write"
+            chat_rows(usage).map(|(label, value)| format!("{label} {value}")),
+            [
+                "Total 5.1M",
+                "Output 34.0K",
+                "Input 1,200",
+                "Cache read 5.0M",
+                "Cache write 80.0K"
+            ]
         );
+        assert!(cache_note(usage).is_some(), "5.0M of 5.1M came from cache");
+        let written = ChatTokenUsage {
+            output: 10,
+            ..Default::default()
+        };
+        assert!(cache_note(written).is_none());
     }
     #[test]
     fn indicator_needs_a_reported_window() {
