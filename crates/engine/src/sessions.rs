@@ -291,6 +291,14 @@ impl SessionsEngine {
         }
     }
 
+    /// Count `chat_id`'s tokens off the runtime: after a run, and the first
+    /// time a chat with no totals is opened, which backfills chats that ran
+    /// before counting existed.
+    pub fn spawn_token_count(&self, chat_id: String, only_if_missing: bool) {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.count_token_usage(&chat_id, only_if_missing));
+    }
+
     fn doc_handle(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let host = self
             .inner
@@ -1405,6 +1413,85 @@ impl Inner {
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
         self.remember_harness_session(chat_id, &session_id, &session_cwd);
         cwd_ok(&session_cwd).then_some(session_id)
+    }
+
+    /// Sum every provider session this chat used, from the CLIs' own
+    /// transcripts (see [`zeron_harness::usage`]), into the chat doc. Only
+    /// the host device has those files. Blocking.
+    fn count_token_usage(&self, chat_id: &str, only_if_missing: bool) {
+        let Some(chat) = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+        else {
+            return;
+        };
+        let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
+            return;
+        };
+        let Some(host) = self.doc_host() else {
+            return;
+        };
+        if chat.device_id != self.device_id {
+            return;
+        }
+        let Ok(handle) = host.open(chat_id) else {
+            return;
+        };
+        if only_if_missing && handle.doc().token_usage().is_some() {
+            return;
+        }
+        let mut sessions = self.journal_harness_sessions(chat_id);
+        if let Some(id) = chat.harness_session_id.filter(|id| !id.is_empty()) {
+            let cwd = chat.harness_session_cwd.or(chat.cwd).unwrap_or_default();
+            sessions.push((id, cwd));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut total = zeron_proto::ChatTokenUsage::default();
+        let mut counted = false;
+        for (id, cwd) in sessions {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(usage) =
+                zeron_harness::usage::session_usage(harness, &id, std::path::Path::new(&cwd))
+            {
+                total.add(usage);
+                counted = true;
+            }
+        }
+        if counted && let Err(err) = handle.doc().set_token_usage(total) {
+            tracing::warn!(chat = %chat_id, error = %err, "token usage write failed");
+        }
+    }
+
+    /// Every harness session id the chat's journal names, oldest first, each
+    /// with the cwd of the `SessionStarted` that governs it.
+    fn journal_harness_sessions(&self, chat_id: &str) -> Vec<(String, String)> {
+        let Ok(events) = self.journal.replay(chat_id, 0) else {
+            return Vec::new();
+        };
+        let mut cwd = String::new();
+        let mut sessions = Vec::new();
+        for (_, event) in events {
+            match event {
+                AgentEvent::SessionStarted {
+                    session_id,
+                    cwd: started_in,
+                    ..
+                } => {
+                    cwd = started_in;
+                    if !session_id.is_empty() {
+                        sessions.push((session_id, cwd.clone()));
+                    }
+                }
+                AgentEvent::Done {
+                    session_id: Some(session_id),
+                    ..
+                } if !session_id.is_empty() => sessions.push((session_id, cwd.clone())),
+                _ => {}
+            }
+        }
+        sessions
     }
 
     /// The last harness session id named anywhere in the chat's journal, with
@@ -3050,6 +3137,15 @@ async fn drive_run(
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
+    {
+        // The CLI may still be flushing its last transcript lines.
+        let inner = inner.clone();
+        let chat_id = chat_id.clone();
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            inner.count_token_usage(&chat_id, false);
+        });
+    }
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.
     let orphans: Vec<RoutedSteer> = if inner

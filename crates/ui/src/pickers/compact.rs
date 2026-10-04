@@ -322,8 +322,15 @@ impl Pickers {
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
-        // The provider button picks the provider; the list holds its models.
-        self.show_compact_list(ModelRail::Harness, "Search models…", cx);
+        // Browse every offered provider, just as the standard picker's rail
+        // allows. rail_descriptors still limits existing chats to their provider.
+        // A foreign-provider row switches the provider before picking its model.
+        let rail = if self.harness_locked(cx) {
+            ModelRail::Harness
+        } else {
+            ModelRail::All
+        };
+        self.show_compact_list(rail, "Search models…", cx);
     }
 
     /// The starred models across providers, opened from the provider page.
@@ -827,11 +834,18 @@ impl Pickers {
 
     /// The panel's shortcuts, live only while it is the picker's page: Up
     /// and Down open the model list on the model beside the selected one,
-    /// Tab cycles providers, Left/Right (Home/End) set the effort.
+    /// Tab cycles providers, Left/Right (Home/End) set the effort, F toggles
+    /// fast mode.
     pub(super) fn compact_panel_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         self.compact_keyboard = true;
         match event.keystroke.key.as_str() {
             "escape" => self.animate_close(cx),
+            "f" if !event.keystroke.modifiers.modified() => {
+                let Some((option, choice, default, _)) = self.compact_fast_choice(cx) else {
+                    return;
+                };
+                self.pick_option(option, choice, default, cx);
+            }
             "up" | "down" => {
                 self.show_compact_models(cx);
                 let delta = if event.keystroke.key == "up" { -1 } else { 1 };

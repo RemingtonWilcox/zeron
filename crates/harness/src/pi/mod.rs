@@ -4,6 +4,11 @@ mod mcp;
 mod normalize;
 mod rpc;
 mod sessions;
+
+/// The native transcript of Pi session `id`, for read-only usage counting.
+pub(crate) fn session_file(id: &str, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    sessions::Store::new(None, None).resolve(id, cwd).ok()
+}
 mod ui;
 
 use crate::{
