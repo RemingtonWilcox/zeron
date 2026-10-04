@@ -43,6 +43,10 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case send
         case queue
         case stop
+        /// Empty composer: the mic.
+        case dictate
+        /// Listening: tap to keep what was said.
+        case dictating
     }
 
     // Callbacks
@@ -108,6 +112,9 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let suggestions = MentionSuggestions()
     private var mentionQuery: (range: NSRange, query: String)?
     private var mentionTask: Task<Void, Never>?
+    private var dictation: Dictation?
+    /// The draft either side of the insertion point; dictation goes between.
+    private var dictationSplit = ("", "")
 
     private let font = Fonts.ui(.sans, UIFontMetrics(forTextStyle: .body).scaledValue(for: 16.5))
     private var maxLines: Int {
@@ -158,6 +165,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             done(self?.attachMenu?().children ?? [])
         }])
         attachButton.showsMenuAsPrimaryAction = true
+        // While dictating "+" becomes cancel (the menu is off then).
+        attachButton.addAction(UIAction { [weak self] _ in self?.cancelDictation() }, for: .touchUpInside)
         content.addSubview(attachButton)
 
         textView.font = font
@@ -285,13 +294,14 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     @objc private func focusFromTap() {
-        if !textView.isFirstResponder { textView.becomeFirstResponder() }
+        if dictation == nil, !textView.isFirstResponder { textView.becomeFirstResponder() }
     }
 
     /// Suggestions float above the bar, outside its bounds — so they live in
     /// the screen's root view (ancestors would otherwise swallow their taps).
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        if window == nil { finishDictation() }
         guard let root = findViewController()?.view, suggestions.superview !== root else { return }
         root.addSubview(suggestions)
         NSLayoutConstraint.activate([
@@ -306,7 +316,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     /// The card is for composing: focused, holding photos, or pinned open
     /// (new-session canvas). An unfocused draft rests as the capsule.
     private var wantsCard: Bool {
-        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty
+        chipsAlwaysVisible || textView.isFirstResponder || !images.isEmpty || dictation != nil
     }
 
     private func updateMode(animated: Bool) {
@@ -576,8 +586,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
 
     private func refreshAction(animated: Bool) {
-        let action: Action = running ? (hasContent ? .queue : .stop) : .send
-        let enabled = action == .stop || hasContent
+        let action: Action = dictation != nil ? .dictating : running ? (hasContent ? .queue : .stop) : (hasContent ? .send : .dictate)
+        let enabled = action != .send || hasContent
         let steering = action == .queue && preferredDelivery == .steer && canSteer
         var config = UIButton.Configuration.filled()
         config.cornerStyle = .capsule
@@ -600,6 +610,16 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             config.baseBackgroundColor = Palette.text
             config.baseForegroundColor = Palette.background
             config.contentInsets = .zero
+        case .dictate:
+            symbol = "mic"
+            config.baseBackgroundColor = Palette.controlFill
+            config.baseForegroundColor = Palette.text
+            config.contentInsets = .zero
+        case .dictating:
+            symbol = "checkmark"
+            config.baseBackgroundColor = Palette.accent
+            config.baseForegroundColor = .white
+            config.contentInsets = .zero
         }
         config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: action == .stop ? 11 : 15, weight: .bold))
         let changed = currentAction != action
@@ -619,6 +639,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case .send: actionButton.accessibilityLabel = "Send message"
         case .queue: actionButton.accessibilityLabel = steering ? "Steer" : "Queue message"
         case .stop: actionButton.accessibilityLabel = "Stop response"
+        case .dictate: actionButton.accessibilityLabel = "Dictate"
+        case .dictating: actionButton.accessibilityLabel = "Finish dictation"
         }
         // Long-press offers the other delivery modes mid-turn.
         if action == .queue {
@@ -645,7 +667,117 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             send(.queue)
         case .queue:
             send(canSteer ? preferredDelivery : (preferredDelivery == .steer ? .queue : preferredDelivery))
+        case .dictate:
+            startDictation()
+        case .dictating:
+            finishDictation()
         }
+    }
+
+    // MARK: Dictation
+
+    private func startDictation() {
+        guard dictation == nil else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let d = Dictation()
+        let ns = textView.text as NSString
+        let cursor = textView.isFirstResponder ? min(textView.selectedRange.location, ns.length) : ns.length
+        dictationSplit = (ns.substring(to: cursor), ns.substring(from: cursor))
+        d.onText = { [weak self] final, live in self?.showDictation(final, live) }
+        d.onFailure = { [weak self, weak d] error in
+            guard let self, let d else { return }
+            self.endDictation(d, keep: true, error: error)
+        }
+        dictation = d
+        setDictating(true, placeholder: "Starting…")
+        Task { [weak self] in
+            do {
+                try await d.start()
+                if self?.dictation === d { self?.placeholderLabel.text = "Listening…" }
+            } catch {
+                await d.cancel()
+                self?.endDictation(d, keep: false, error: error)
+            }
+        }
+    }
+
+    private func finishDictation() {
+        guard let d = dictation else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        actionButton.isEnabled = false
+        Task { [weak self] in
+            await d.finish()
+            self?.endDictation(d, keep: true)
+        }
+    }
+
+    private func cancelDictation() {
+        guard let d = dictation else { return }
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        endDictation(d, keep: false)
+        Task { await d.cancel() }
+    }
+
+    /// Final text in body color, the still-changing tail dimmed; the draft
+    /// around the insertion point is never touched.
+    private func showDictation(_ final: String, _ live: String) {
+        let (before, after) = dictationSplit
+        let head = String(final.drop(while: \.isWhitespace))
+        let tail = head.isEmpty ? String(live.drop(while: \.isWhitespace)) : live
+        let spoken = !(head + tail).isEmpty
+        let lead = spoken && !(before.last?.isWhitespace ?? true) ? " " : ""
+        let trail = spoken && !(after.first?.isWhitespace ?? true) ? " " : ""
+        let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Palette.text]
+        let s = NSMutableAttributedString(string: before + lead + head, attributes: base)
+        s.append(NSAttributedString(string: tail, attributes: [.font: font, .foregroundColor: Palette.secondary]))
+        s.append(NSAttributedString(string: trail + after, attributes: base))
+        textView.attributedText = s
+        textChanged()
+        textView.scrollRangeToVisible(NSRange(location: s.length - ((trail + after) as NSString).length, length: 0))
+    }
+
+    private func endDictation(_ d: Dictation, keep: Bool, error: Error? = nil) {
+        guard dictation === d else { return }
+        d.onText = nil
+        d.onFailure = nil
+        dictation = nil
+        let original = dictationSplit.0 + dictationSplit.1
+        let result = keep ? textView.text ?? "" : original
+        textView.attributedText = NSAttributedString(string: result, attributes: [.font: font, .foregroundColor: Palette.text])
+        setDictating(false, placeholder: placeholder)
+        textChanged()
+        styleMentions()
+        if keep, result != original {
+            textView.becomeFirstResponder()
+            let caret = (result as NSString).length - (dictationSplit.1 as NSString).length
+            textView.selectedRange = NSRange(location: max(0, caret), length: 0)
+        }
+        guard let error else { return }
+        NSLog("dictation: \(error)")
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+        let message = (error as? Dictation.Failure)?.errorDescription ?? "Dictation stopped: \(error.localizedDescription)"
+        guard textView.text.isEmpty else { return Toast.show(message, in: window) }
+        placeholderLabel.text = message
+        placeholderLabel.textColor = Palette.danger
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.dictation == nil else { return }
+            self.placeholderLabel.text = self.placeholder
+            self.placeholderLabel.textColor = Palette.tertiary
+        }
+    }
+
+    /// "+" ⇄ cancel, read-only text while listening, card held open.
+    private func setDictating(_ on: Bool, placeholder text: String) {
+        var attach = attachButton.configuration
+        attach?.image = UIImage(systemName: on ? "xmark" : "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
+        attachButton.configuration = attach
+        attachButton.showsMenuAsPrimaryAction = !on
+        attachButton.accessibilityLabel = on ? "Cancel dictation" : "Attach"
+        textView.isEditable = !on
+        placeholderLabel.text = text
+        placeholderLabel.textColor = Palette.tertiary
+        updateMode(animated: true)
+        refreshAction(animated: true)
     }
 
     private func send(_ mode: DeliveryMode) {

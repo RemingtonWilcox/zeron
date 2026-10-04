@@ -54,6 +54,10 @@
 	<string>Attach photos to messages.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Take photos to attach to messages.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Dictate messages with the microphone.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Turn your speech into message text, on this iPhone.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
