@@ -538,7 +538,12 @@ impl ClaudeHarness {
                 "--setting-sources",
                 "",
             ]);
-        } else if let Some(mcp) = &request.mcp {
+        } else {
+            // Claude in Chrome: browser tools on the user's own Chrome, through
+            // the extension and its native-messaging host.
+            cmd.arg("--chrome");
+        }
+        if let Some(mcp) = request.mcp.as_ref().filter(|_| !title_only) {
             // Zeron's own server rides beside the user's configured servers
             // (no `--strict-mcp-config`): the CLI merges an inline JSON
             // config with settings-sourced ones.
