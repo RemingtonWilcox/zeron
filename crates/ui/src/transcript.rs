@@ -3258,6 +3258,10 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
+    /// Pasted texts open in full from a sent message's pill.
+    paste_view: Option<Vec<SharedString>>,
+    paste_view_focus: gpui::FocusHandle,
+    paste_view_scroll: gpui::ScrollHandle,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
@@ -3550,6 +3554,9 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             attachment_preview: None,
+            paste_view: None,
+            paste_view_focus: cx.focus_handle(),
+            paste_view_scroll: gpui::ScrollHandle::new(),
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
             diagrams: Rc::default(),
@@ -6649,11 +6656,24 @@ impl Transcript {
                             .gap(px(6.0))
                             .pb(px(6.0))
                             .children(badges.iter().enumerate().map(|(bix, badge)| {
-                                crate::badges::render(
+                                let pill = crate::badges::render(
                                     SharedString::from(format!("{}#badge{bix}", row.id)),
                                     badge,
                                     &theme,
-                                )
+                                );
+                                if badge.full.is_empty() {
+                                    return pill.into_any_element();
+                                }
+                                let full = badge.full.clone();
+                                pill.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.paste_view = Some(full.clone());
+                                        this.paste_view_scroll = gpui::ScrollHandle::new();
+                                        window.focus(&this.paste_view_focus, cx);
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
                             })),
                     );
                 }
@@ -9272,6 +9292,26 @@ impl Render for Transcript {
             ))
             .child(content)
             .child(rail);
+        let root = match self.paste_view.clone() {
+            Some(texts) => {
+                let weak = cx.weak_entity();
+                root.child(crate::pasted::viewer(
+                    window,
+                    &texts,
+                    &self.paste_view_focus,
+                    &self.paste_view_scroll,
+                    Vec::new(),
+                    move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.paste_view = None;
+                            cx.notify();
+                        });
+                    },
+                    cx,
+                ))
+            }
+            None => root,
+        };
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
