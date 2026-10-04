@@ -30,6 +30,8 @@ final class Dictation {
     private var input: AsyncStream<AnalyzerInput>.Continuation?
     private var results: Task<Void, Never>?
     private var stopped = false
+    private var tapped = false
+    private var sessionActive = false
 
     /// Ask for access, prepare the model (iOS downloads it once if needed)
     /// and start listening. Throws a `Failure` with a short, honest message.
@@ -59,9 +61,17 @@ final class Dictation {
         }
         guard !stopped else { return }
 
+        // Session first, and a real input route, before the engine's input
+        // node is touched (that call aborts when there's no usable input).
+        guard AVAudioApplication.shared.recordPermission == .granted else { throw Failure.micDenied }
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement, options: .duckOthers)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+        sessionActive = true
+        guard session.isInputAvailable, session.inputNumberOfChannels > 0, session.sampleRate > 0 else {
+            teardownAudio()
+            throw Failure.noMicrophone
+        }
         let mic = engine.inputNode.outputFormat(forBus: 0)
         guard mic.sampleRate > 0, mic.channelCount > 0 else {
             teardownAudio()
@@ -75,6 +85,7 @@ final class Dictation {
         try await analyzer.start(inputSequence: stream)
         guard !stopped else { return teardownAudio() }
         engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: mic, block: Self.tap(from: mic, to: format, into: continuation))
+        tapped = true
         engine.prepare()
         try engine.start()
     }
@@ -126,10 +137,13 @@ final class Dictation {
 
     private func teardownAudio() {
         if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
+        // Only touch the input node if we already did (see start()).
+        if tapped { engine.inputNode.removeTap(onBus: 0) }
+        tapped = false
         input?.finish()
         input = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if sessionActive { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        sessionActive = false
     }
 
     /// Built outside the main actor: the tap runs on the audio thread.
