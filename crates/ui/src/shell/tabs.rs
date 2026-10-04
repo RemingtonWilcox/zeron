@@ -635,6 +635,10 @@ impl Shell {
                             el.child(
                                 div()
                                     .id("titlebar-session-target")
+                                    // Out of the titlebar's drag area: on Windows
+                                    // that area is the native caption, which takes
+                                    // the click to move the window.
+                                    .occlude()
                                     .min_w_0()
                                     .flex()
                                     .flex_row()
