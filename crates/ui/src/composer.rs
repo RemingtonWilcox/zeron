@@ -5000,6 +5000,9 @@ impl Render for ComposerInput {
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
+    /// The model picker chose another agent for this chat; see
+    /// [`crate::pickers::ContinueInSideChat`].
+    ContinueInSideChat(zeron_proto::ChatConfig),
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -5775,6 +5778,7 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     _picker_focus: Subscription,
+    _picker_continue: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
     dictation_activation: Option<Subscription>,
@@ -5870,6 +5874,12 @@ impl Composer {
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
                 this.focus_pending = true;
                 cx.notify();
+            },
+        );
+        let picker_continue = cx.subscribe(
+            &pickers,
+            |_: &mut Self, _, event: &crate::pickers::ContinueInSideChat, cx| {
+                cx.emit(ComposerEvent::ContinueInSideChat(event.0.clone()));
             },
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
@@ -6027,6 +6037,7 @@ impl Composer {
             account_usage,
             side_chat: false,
             _picker_focus: picker_focus,
+            _picker_continue: picker_continue,
             _input_events: input_events,
             _dictation_events: dictation_events,
             dictation_activation: None,

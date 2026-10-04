@@ -363,13 +363,16 @@ impl Pickers {
     }
 
     pub(super) fn show_compact_providers(&mut self, cx: &mut Context<Self>) {
-        if self.harness_locked(cx) {
-            return;
-        }
         self.setting_menu = None;
         self.compact_model_list = false;
         self.compact_providers = true;
-        self.reset_compact_search("Search providers…", cx);
+        // A chat's own provider is fixed; another one continues it.
+        let placeholder = if self.harness_locked(cx) {
+            "Continue in a side chat with…"
+        } else {
+            "Search providers…"
+        };
+        self.reset_compact_search(placeholder, cx);
         let effective = self.effective_harness(cx);
         self.active = self
             .compact_provider_rows(cx)
@@ -422,6 +425,10 @@ impl Pickers {
     /// Picking a provider runs its last-used model at that model's last
     /// settings (the remembered defaults take over once the harness moves).
     pub(super) fn pick_compact_provider(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if self.harness_locked(cx) && self.effective_harness(cx) != Some(harness) {
+            self.continue_in_side_chat(harness, None, cx);
+            return;
+        }
         self.model_rail = ModelRail::Harness;
         self.pick_harness(harness, cx);
         self.show_compact_panel(cx);
@@ -1114,7 +1121,7 @@ impl Pickers {
             );
         }
         // The provider is a square button as tall as the title, leading it.
-        // A chat whose harness is fixed shows the mark without the button.
+        // In a chat whose harness is fixed, it continues the chat elsewhere.
         let header_height = if levels.is_empty() {
             HEADER_HEIGHT_SINGLE
         } else {
@@ -1131,13 +1138,9 @@ impl Pickers {
                 .unwrap_or_default()
                 .into();
             let provider_key: SharedString = format!("compact-provider-{}", cx.entity_id()).into();
-            let provider_hover = if locked {
-                0.0
-            } else {
-                motion::hover_t(&provider_key)
-            };
+            let provider_hover = motion::hover_t(&provider_key);
             let hint: SharedString = if locked {
-                name.clone()
+                format!("{name} · Continue with another provider").into()
             } else {
                 format!("{name} · Change provider").into()
             };
@@ -1151,17 +1154,18 @@ impl Pickers {
                 .items_center()
                 .justify_center()
                 .bg(crate::theme::ink(0.05 * provider_hover))
-                .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
-                .when(!locked, |el| {
-                    el.role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("{name} · Change provider")))
-                        .cursor_pointer()
-                        .on_hover(motion::hover_listener(provider_key))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.compact_keyboard = false;
-                            this.show_compact_providers(cx);
-                        }))
+                .tooltip({
+                    let hint = hint.clone();
+                    move |_, cx| cx.new(|_| PickerHint(hint.clone())).into()
                 })
+                .role(gpui::Role::Button)
+                .aria_label(hint)
+                .cursor_pointer()
+                .on_hover(motion::hover_listener(provider_key))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.compact_keyboard = false;
+                    this.show_compact_providers(cx);
+                }))
                 .child(
                     crate::icons::icon(icon)
                         .size(px(16.0))
