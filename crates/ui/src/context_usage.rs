@@ -1,7 +1,7 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::theme::Theme;
 use gpui::{IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px};
-use zeron_proto::ContextUsage;
+use zeron_proto::{ChatTokenUsage, ContextUsage};
 
 /// The context ring's trigger chip; the footer ([`crate::account_usage`])
 /// opens [`card`] from it on click.
@@ -147,27 +147,84 @@ fn details(usage: Option<ContextUsage>) -> String {
     }
 }
 
-/// The context ring's popover content.
-pub fn card(usage: Option<ContextUsage>, theme: &Theme) -> gpui::Div {
+/// `1,234` below ten thousand, then `12.3K`, `4.5M`, `1.2B`.
+fn compact(count: u64) -> String {
+    let scaled = |div: f64, unit: &str| {
+        let value = count as f64 / div;
+        if value < 100.0 {
+            format!("{value:.1}{unit}")
+        } else {
+            format!("{value:.0}{unit}")
+        }
+    };
+    match count {
+        0..10_000 => with_separators(count),
+        10_000..1_000_000 => scaled(1e3, "K"),
+        1_000_000..1_000_000_000 => scaled(1e6, "M"),
+        _ => scaled(1e9, "B"),
+    }
+}
+
+/// The chat's running bill: every provider session it used, cache included.
+fn chat_details(usage: ChatTokenUsage) -> String {
+    format!(
+        "{} tokens\n{} in · {} out\n{} cache read · {} cache write",
+        compact(usage.total()),
+        compact(usage.input),
+        compact(usage.output),
+        compact(usage.cache_read),
+        compact(usage.cache_write),
+    )
+}
+
+fn section(theme: &Theme, text: String) -> gpui::Div {
+    div()
+        .px(px(8.0))
+        .pb(px(6.0))
+        .text_size(px(12.0))
+        .line_height(px(19.0))
+        .whitespace_nowrap()
+        .text_color(theme.text_muted)
+        .child(SharedString::from(text))
+}
+
+/// The context ring's popover content: the window now, then what the chat
+/// has used so far when its host has counted it.
+pub fn card(usage: Option<ContextUsage>, tokens: Option<ChatTokenUsage>, theme: &Theme) -> gpui::Div {
     crate::popover::popover_card(theme)
         .flex()
         .flex_col()
         .child(crate::popover::menu_heading(theme, "Context window"))
-        .child(
-            div()
-                .px(px(8.0))
-                .pb(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(19.0))
-                .whitespace_nowrap()
-                .text_color(theme.text_muted)
-                .child(SharedString::from(details(usage))),
-        )
+        .child(section(theme, details(usage)))
+        .when_some(tokens.filter(|tokens| tokens.total() > 0), |card, tokens| {
+            card.child(crate::popover::menu_heading(theme, "This chat"))
+                .child(section(theme, chat_details(tokens)))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_usage_reads_compactly() {
+        assert_eq!(compact(9_999), "9,999");
+        assert_eq!(compact(12_345), "12.3K");
+        assert_eq!(compact(4_560_000), "4.6M");
+        assert_eq!(compact(250_000_000), "250M");
+        let usage = ChatTokenUsage {
+            input: 1_200,
+            output: 34_000,
+            cache_read: 5_000_000,
+            cache_write: 80_000,
+        };
+        assert_eq!(
+            chat_details(usage),
+            "5.1M tokens
+1,200 in · 34.0K out
+5.0M cache read · 80.0K cache write"
+        );
+    }
     #[test]
     fn indicator_needs_a_reported_window() {
         assert!(!has_window(None));
