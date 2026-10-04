@@ -846,6 +846,29 @@ mod tests {
     }
 }
 
+/// The folder general chats (the desktop's floating Chat panel) run in. A
+/// harness launched there is a web-capable assistant, not a coding agent.
+pub const GENERAL_CHAT_DIR: &str = "general-chat";
+
+/// Whether `cwd` is a general chat's folder ([`GENERAL_CHAT_DIR`]).
+pub fn is_general_chat_dir(cwd: &str) -> bool {
+    cwd.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name == GENERAL_CHAT_DIR)
+}
+
+#[cfg(test)]
+mod general_chat_tests {
+    #[test]
+    fn general_chat_folders_match_by_name_on_either_separator() {
+        assert!(super::is_general_chat_dir(r"C:\Users\me\AppData\Local\Zeron\general-chat"));
+        assert!(super::is_general_chat_dir("/home/me/.zeron/general-chat/"));
+        assert!(!super::is_general_chat_dir(r"C:\code\general-chat-app"));
+        assert!(!super::is_general_chat_dir(""));
+    }
+}
+
 /// Host-owned context snapshot, replicated with the chat document.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

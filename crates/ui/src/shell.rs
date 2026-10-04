@@ -60,6 +60,8 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod actions_ui;
 mod chat_dropzone;
+mod chat_panel;
+pub(crate) use chat_panel::is_general_chat;
 #[cfg(test)]
 mod chat_dropzone_tests;
 #[cfg(test)]
@@ -1892,6 +1894,8 @@ pub struct Shell {
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
+    /// The floating Chat panel (see [`chat_panel`]).
+    chat_panel: Option<chat_panel::ChatPanel>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2347,6 +2351,7 @@ impl Shell {
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
+            chat_panel: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -8391,6 +8396,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .child(self.render_chat_button(theme, cx))
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -12945,13 +12951,16 @@ impl Render for Shell {
                 } else {
                     main
                 };
+                let chat_panel = self.render_chat_panel(cx);
                 let card: AnyElement = div()
                     .flex_1()
                     .min_w_0()
+                    .relative()
                     .flex()
                     .flex_row()
                     .overflow_hidden()
                     .child(main)
+                    .children(chat_panel)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
