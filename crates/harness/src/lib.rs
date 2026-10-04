@@ -189,6 +189,7 @@ pub mod process;
 mod scratch;
 pub mod shell_env;
 pub(crate) mod skills;
+pub mod usage;
 #[cfg(windows)]
 pub mod windows_process;
 
