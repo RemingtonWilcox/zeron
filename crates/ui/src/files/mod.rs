@@ -609,6 +609,7 @@ impl FilesSurface {
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
+            | ComposerInputEvent::OpenAttachment(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged => {}
         });
