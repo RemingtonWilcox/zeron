@@ -5385,7 +5385,7 @@ impl Shell {
             format!("Chats ({total})").into()
         };
         let chevron = self.sidebar_disclosure_chevron("chats", open, theme);
-        let header = sidebar_disclosure_header(theme, label, None, chevron)
+        let header = sidebar_disclosure_header(theme, None, label, None, chevron)
             .id("chats-toggle")
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.general_chats_open;
@@ -5428,6 +5428,7 @@ impl Shell {
                     false,
                     None,
                     None,
+                    self.settings.sidebar_show_project_icon,
                     None,
                     theme,
                     cx,
