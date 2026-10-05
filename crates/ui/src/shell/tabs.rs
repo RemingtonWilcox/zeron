@@ -203,8 +203,12 @@ impl Shell {
     }
 
     /// Open a session from the sidebar: select it, the main area follows.
+    /// A general chat opens in the floating Chat panel instead.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
+        if self.open_general_chat(&chat_id, cx) {
+            return;
+        }
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state

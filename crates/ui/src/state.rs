@@ -1781,9 +1781,10 @@ impl AppState {
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        // General chats live in the floating Chat panel, not the sidebar.
-        self.chats.iter().filter(|c| {
-            !c.archived && c.parent_chat_id.is_none() && !crate::shell::is_general_chat(c)
+        // General chats list in the sidebar's own Chats section.
+        let data_dir = self.data_dir.as_deref();
+        self.chats.iter().filter(move |c| {
+            !c.archived && c.parent_chat_id.is_none() && !crate::shell::is_general_chat(c, data_dir)
         })
     }
 

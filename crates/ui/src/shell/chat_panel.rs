@@ -8,7 +8,8 @@
 //! chat is where it runs: [`zeron_proto::GENERAL_CHAT_DIR`] under the data
 //! dir, whose `CLAUDE.md` / `AGENTS.md` make the agent a conversational
 //! assistant; the Claude harness also launches there with web search and
-//! fetch allowed and edits and shell denied. The sidebar hides those chats.
+//! fetch allowed and edits and shell denied. The sidebar lists those chats in
+//! their own Chats section, and opening one raises the panel.
 
 use super::*;
 
@@ -56,7 +57,6 @@ enum Edges {
 pub(super) struct ChatPanelLayout {
     width: f32,
     height: f32,
-    history_open: bool,
     /// Pointer and size where the current resize began.
     resize: Option<(Point<f32>, (f32, f32), Edges)>,
 }
@@ -66,7 +66,6 @@ impl Default for ChatPanelLayout {
         Self {
             width: 400.0,
             height: 560.0,
-            history_open: false,
             resize: None,
         }
     }
@@ -91,11 +90,16 @@ fn resized(
     (width, height)
 }
 
-/// Whether `chat` is a general chat (runs in the general-chat folder).
-pub(crate) fn is_general_chat(chat: &zeron_proto::Chat) -> bool {
+/// Whether `chat` is a general chat: it runs in the general-chat folder under
+/// `data_dir`.
+pub(crate) fn is_general_chat(
+    chat: &zeron_proto::Chat,
+    data_dir: Option<&std::path::Path>,
+) -> bool {
     chat.cwd
         .as_deref()
-        .is_some_and(zeron_proto::is_general_chat_dir)
+        .zip(data_dir)
+        .is_some_and(|(cwd, data_dir)| zeron_proto::is_general_chat_dir(cwd, data_dir))
 }
 
 /// Create the general-chat folder and its agent instructions when missing.
@@ -177,7 +181,7 @@ impl Shell {
     }
 
     /// Open `chat` in the panel, replacing whatever it showed.
-    fn show_in_chat_panel(
+    pub(super) fn show_in_chat_panel(
         &mut self,
         chat: zeron_proto::Chat,
         unsaved: bool,
@@ -199,7 +203,11 @@ impl Shell {
         let events = vec![
             cx.subscribe(&composer, {
                 let transcript = transcript.clone();
-                move |_: &mut Self, _, event, cx| match event {
+                let state = state.clone();
+                move |this: &mut Self, _, event, cx| match event {
+                    ComposerEvent::ContinueInSideChat(config) => {
+                        this.continue_in_side_chat(&state, config.clone(), cx);
+                    }
                     ComposerEvent::Sent {
                         chat_id,
                         message_id,
@@ -224,7 +232,6 @@ impl Shell {
             open: true,
             _events: events,
         });
-        self.chat_panel_layout.history_open = false;
         cx.notify();
     }
 
@@ -296,43 +303,33 @@ impl Shell {
             )
     }
 
-    /// Reopen an earlier general chat in the panel.
-    fn open_general_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let chat = self
-            .state
-            .read(cx)
+    /// Open `chat_id` in the panel when it is a general chat; false otherwise.
+    /// The chat already in the panel just comes back up, draft and all.
+    pub(super) fn open_general_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
+        if let Some(panel) = self.chat_panel.as_mut()
+            && panel.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+        {
+            panel.open = true;
+            cx.notify();
+            return true;
+        }
+        let state = self.state.read(cx);
+        let chat = state
             .chats
             .iter()
-            .find(|chat| chat.id == chat_id)
+            .find(|chat| chat.id == chat_id && is_general_chat(chat, state.data_dir.as_deref()))
             .cloned();
-        if let Some(chat) = chat {
-            self.show_in_chat_panel(chat, false, cx);
-        }
+        let Some(chat) = chat else {
+            return false;
+        };
+        self.show_in_chat_panel(chat, false, cx);
+        true
     }
 
-    /// Earlier general chats, newest first.
-    fn recent_general_chats(&self, cx: &App) -> Vec<(String, SharedString)> {
-        let mut chats: Vec<_> = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .filter(|chat| !chat.archived && is_general_chat(chat))
-            .collect();
-        chats
-            .sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
-        chats
-            .into_iter()
-            .take(12)
-            .map(|chat| {
-                let title = chat
-                    .title
-                    .clone()
-                    .or_else(|| chat.last_message_preview.clone())
-                    .unwrap_or_else(|| "New chat".into());
-                (chat.id.clone(), title.into())
-            })
-            .collect()
+    /// The chat the open panel shows.
+    pub(super) fn chat_panel_chat_id(&self, cx: &App) -> Option<String> {
+        let panel = self.chat_panel.as_ref().filter(|panel| panel.open)?;
+        panel.state.read(cx).selected_chat.clone()
     }
 
     /// The sidebar's Chat row, above the session list.
@@ -419,7 +416,6 @@ impl Shell {
             composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
             composer.set_available_width(width - 2.0 * Theme::SPACE_SM, cx);
         });
-        let current = panel.state.read(cx).selected_chat.clone();
         let title: SharedString = panel
             .state
             .read(cx)
@@ -428,45 +424,6 @@ impl Shell {
             .map(|title| transcript::single_line(&title))
             .unwrap_or_else(|| "New chat".into())
             .into();
-        let recent = self.recent_general_chats(cx);
-        let history = (self.chat_panel_layout.history_open && !recent.is_empty()).then(|| {
-            let rows = recent.into_iter().map(|(id, title)| {
-                let selected = current.as_deref() == Some(id.as_str());
-                div()
-                    .id(SharedString::from(format!("chat-panel-recent-{id}")))
-                    .h(px(28.0))
-                    .px(px(Theme::SPACE_SM))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .when(selected, |row| row.bg(theme.ink(0.06)))
-                    .hover(|style| style.bg(theme.ink(0.08)).text_color(theme.text))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_general_chat(&id, cx)))
-                    .child(div().min_w_0().truncate().child(title))
-            });
-            crate::popover::popover_card(&theme)
-                .id("chat-panel-history")
-                .absolute()
-                .top(px(40.0))
-                .left(px(Theme::SPACE_SM))
-                .right(px(Theme::SPACE_SM))
-                .max_h(px(260.0))
-                .overflow_y_scroll()
-                .p(px(Theme::SPACE_XS))
-                .flex()
-                .flex_col()
-                .occlude()
-                .child(crate::popover::menu_heading(&theme, "Recent chats"))
-                .children(rows)
-        });
-        let history_active = self.chat_panel_layout.history_open;
         let header = div()
             .flex_none()
             .h(px(36.0))
@@ -494,20 +451,6 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
-            )
-            .child(
-                self.panel_button(
-                    "chat-panel-history-button",
-                    icons::CLOCK_CIRCLE,
-                    "Recent chats",
-                    &theme,
-                    |this, cx| {
-                        this.chat_panel_layout.history_open = !this.chat_panel_layout.history_open;
-                        cx.notify();
-                    },
-                    cx,
-                )
-                .when(history_active, |button| button.bg(theme.ink(0.08))),
             )
             .child(self.panel_button(
                 "chat-panel-new",
@@ -568,7 +511,6 @@ impl Shell {
                         .child(div().size_full().child(transcript)),
                 )
                 .child(div().flex_none().child(composer))
-                .children(history)
                 .child(self.chat_panel_resize_handle(Edges::Top, cx))
                 .child(self.chat_panel_resize_handle(Edges::Left, cx))
                 .child(self.chat_panel_resize_handle(Edges::TopLeft, cx))
@@ -580,6 +522,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn resizing_grows_up_and_left_within_bounds() {
@@ -619,14 +562,15 @@ mod tests {
             }))
             .unwrap()
         };
-        assert!(is_general_chat(&chat(Some(
-            r"C:\Users\me\AppData\Local\Zeron\general-chat"
-        ))));
-        assert!(is_general_chat(&chat(Some(
-            "/home/me/.zeron/general-chat/"
-        ))));
-        assert!(!is_general_chat(&chat(Some(r"C:\code\general-chat-app"))));
-        assert!(!is_general_chat(&chat(None)));
+        let general = |cwd| is_general_chat(&chat(cwd), Some(Path::new("/home/me/.zeron")));
+        assert!(general(Some("/home/me/.zeron/general-chat")));
+        // A project folder that shares the name is a coding session.
+        assert!(!general(Some("/home/me/code/general-chat")));
+        assert!(!general(None));
+        assert!(!is_general_chat(
+            &chat(Some("/home/me/.zeron/general-chat")),
+            None
+        ));
     }
 
     #[test]

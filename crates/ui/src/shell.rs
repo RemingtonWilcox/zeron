@@ -1835,6 +1835,8 @@ pub struct Shell {
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
+    /// The sidebar's Chats section (general chats).
+    pub(super) general_chats_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -2330,6 +2332,7 @@ impl Shell {
             archived_open: true,
             pinned_open: true,
             sessions_open: true,
+            general_chats_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
@@ -8222,6 +8225,7 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
+        let general_chats = self.render_general_chats_section(theme, cx);
 
 
         // The space filter lives ABOVE the scroll region (fixed) so its
@@ -8382,6 +8386,7 @@ impl Shell {
                     // No "Sessions" header (user request) — the list
                     // is the whole column; a little air stands in.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
+                    .children(general_chats)
                     .child(active_list)
                     .children(archived_section)
                     .children(moving_row),

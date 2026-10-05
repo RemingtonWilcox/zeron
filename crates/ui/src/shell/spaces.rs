@@ -4344,7 +4344,7 @@ impl Shell {
     /// clear), or a synced section could not be expanded. Either way the
     /// sidebar notice says why.
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
-        let (active, archived) = {
+        let (active, archived, general) = {
             let state = self.state.read(cx);
             let active = state
                 .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
@@ -4355,13 +4355,23 @@ impl Shell {
                 .archived_sidebar_chats(cx)
                 .iter()
                 .position(|chat| chat.id == chat_id);
-            (active, archived)
+            let general = state.chats.iter().any(|chat| {
+                chat.id == chat_id
+                    && !chat.archived
+                    && super::is_general_chat(chat, state.data_dir.as_deref())
+            });
+            (active, archived, general)
         };
-        if active.is_none() && archived.is_none() {
+        if active.is_none() && archived.is_none() && !general {
             self.sidebar_notice = Some("Clear the project filter to rename this session".into());
             return false;
         }
-        if let Some(chat) = &active {
+        if general {
+            if !self.general_chats_open {
+                self.general_chats_open = true;
+                self.queue_sidebar_reveal("chats");
+            }
+        } else if let Some(chat) = &active {
             if self.active_sidebar_pins(cx).contains(&chat.id) {
                 if !self.pinned_open {
                     self.pinned_open = true;
@@ -5176,6 +5186,130 @@ impl Shell {
             .child(header)
             .child(body)
             .into_any_element()
+    }
+
+    /// General chats (the floating Chat panel's) above the sessions, newest
+    /// first, as session rows; opening one raises the panel. Hidden while
+    /// there are none.
+    pub(super) fn render_general_chats_section(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        const SHOWN: usize = 8;
+        let now = Utc::now();
+        let (rows, total) = {
+            let state = self.state.read(cx);
+            let data_dir = state.data_dir.as_deref();
+            let mut chats: Vec<_> = state
+                .chats
+                .iter()
+                .filter(|chat| !chat.archived && super::is_general_chat(chat, data_dir))
+                .collect();
+            chats.sort_by_key(|chat| {
+                std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at))
+            });
+            let rows: Vec<_> = chats
+                .iter()
+                .take(SHOWN)
+                .map(|chat| {
+                    self.sidebar_chat_data(
+                        state.display_status_for(chat, now),
+                        (*chat).clone(),
+                        state,
+                    )
+                })
+                .collect();
+            (rows, chats.len())
+        };
+        if rows.is_empty() {
+            return None;
+        }
+        let open = self.general_chats_open;
+        let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+            + rows
+                .iter()
+                .map(|row| {
+                    sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        row.branch.is_some(),
+                        row.change_request.is_some(),
+                    )
+                })
+                .sum::<f32>()
+            + rows.len().saturating_sub(1) as f32 * SIDEBAR_LIST_GAP;
+        self.begin_queued_sidebar_reveal("chats", open, body_height);
+        let label: SharedString = if open {
+            "Chats".into()
+        } else {
+            format!("Chats ({total})").into()
+        };
+        let chevron = self.sidebar_disclosure_chevron("chats", open, theme);
+        let header = sidebar_disclosure_header(theme, label, None, chevron)
+            .id("chats-toggle")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = this.general_chats_open;
+                this.begin_sidebar_disclosure_motion(
+                    "chats",
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                this.general_chats_open = !was_open;
+                cx.notify();
+            }));
+        let selected = self.chat_panel_chat_id(cx);
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+            .gap(px(SIDEBAR_LIST_GAP));
+        for row in rows {
+            let chat = row.chat;
+            let harness = self
+                .settings
+                .sidebar_show_harness
+                .then(|| chat.config.as_ref().map(|c| c.harness))
+                .flatten();
+            list = list.child(
+                self.render_chat_row(
+                    chat.id.clone(),
+                    transcript::single_line(
+                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
+                    )
+                    .into(),
+                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into(),
+                    row.folder.into(),
+                    row.branch.map(SharedString::from),
+                    row.change_request,
+                    harness,
+                    row.status,
+                    selected.as_deref() == Some(chat.id.as_str()),
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                    theme,
+                    cx,
+                ),
+            );
+        }
+        let body = self.render_sidebar_disclosure_body(
+            "chats",
+            open,
+            body_height,
+            list.into_any_element(),
+        );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .pb(px(SIDEBAR_SECTION_GAP))
+                .child(header)
+                .child(body)
+                .into_any_element(),
+        )
     }
 
     /// The Archived shelf's chats under the project filter, in sidebar order.

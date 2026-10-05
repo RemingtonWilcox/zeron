@@ -77,30 +77,42 @@ fn adapters_root_with(
     env: &impl Fn(&str) -> Option<OsString>,
     platform: crate::executable::Platform,
 ) -> Option<PathBuf> {
+    env("ZERON_ADAPTERS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| data_dir_with(env, platform).map(|dir| dir.join("adapters")))
+}
+
+/// Zeron's data dir as the app resolves it: `$ZERON_DATA_DIR`, else
+/// `%LOCALAPPDATA%/Zeron` (or `%USERPROFILE%/AppData/Local/Zeron`) on
+/// Windows and `~/.zeron` elsewhere.
+pub(crate) fn data_dir() -> Option<PathBuf> {
+    data_dir_with(
+        &|key| std::env::var_os(key),
+        crate::executable::Platform::current(),
+    )
+}
+
+fn data_dir_with(
+    env: &impl Fn(&str) -> Option<OsString>,
+    platform: crate::executable::Platform,
+) -> Option<PathBuf> {
     let value = |key| {
         env(key)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
-    if let Some(dir) = value("ZERON_ADAPTERS_DIR") {
-        return Some(dir);
-    }
     if let Some(dir) = value("ZERON_DATA_DIR") {
-        return Some(dir.join("adapters"));
+        return Some(dir);
     }
     if platform == crate::executable::Platform::Windows {
         value("LOCALAPPDATA")
-            .map(|dir| dir.join("Zeron").join("adapters"))
+            .map(|dir| dir.join("Zeron"))
             .or_else(|| {
-                value("USERPROFILE").map(|home| {
-                    home.join("AppData")
-                        .join("Local")
-                        .join("Zeron")
-                        .join("adapters")
-                })
+                value("USERPROFILE").map(|home| home.join("AppData").join("Local").join("Zeron"))
             })
     } else {
-        value("HOME").map(|home| home.join(".zeron").join("adapters"))
+        value("HOME").map(|home| home.join(".zeron"))
     }
 }
 
