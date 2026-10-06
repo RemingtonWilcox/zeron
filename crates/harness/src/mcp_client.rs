@@ -13,10 +13,6 @@ use crate::HarnessError;
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
 
-/// How long a server may take to start and list its tools (uv may install
-/// the server's dependencies first).
-const START_TIMEOUT: Duration = Duration::from_secs(60);
-
 pub struct McpClient {
     rpc: RpcClient,
     _child: Child,
@@ -24,7 +20,8 @@ pub struct McpClient {
 
 impl McpClient {
     /// Starts `command` and completes the MCP handshake. Returns the client
-    /// and the server's tools as its `tools/list` spelled them.
+    /// and the server's tools as its `tools/list` spelled them. Dropping the
+    /// future stops the server.
     pub async fn start(
         command: &str,
         args: &[String],
@@ -81,19 +78,15 @@ impl McpClient {
                 }
             }
         };
-        match tokio::time::timeout(START_TIMEOUT, handshake).await {
-            Ok(Ok(tools)) => Ok((Self { rpc, _child: child }, tools)),
-            Ok(Err(_)) if rpc.is_closed() => {
+        match handshake.await {
+            Ok(tools) => Ok((Self { rpc, _child: child }, tools)),
+            Err(_) if rpc.is_closed() => {
                 stderr.wait_closed().await;
                 let status = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
                 let status = status.ok().and_then(Result::ok);
                 Err(crate::crash_message(command, status, &stderr))
             }
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err(format!(
-                "{command} did not answer within {}s",
-                START_TIMEOUT.as_secs()
-            )),
+            Err(error) => Err(error.to_string()),
         }
     }
 

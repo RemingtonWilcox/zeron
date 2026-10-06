@@ -7,10 +7,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use zeron_harness::claude::desktop_extensions::{self, Extension};
 use zeron_harness::mcp_client::McpClient;
+
+/// How long a connector may take to start and list its tools, and to answer
+/// a call, before it counts as stuck.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) struct Connectors {
     desktop: Option<PathBuf>,
@@ -23,6 +29,8 @@ pub(crate) struct Connectors {
     starting: tokio::sync::Mutex<()>,
     /// Bumped whenever the tool list grows.
     revision: AtomicU64,
+    start_timeout: Duration,
+    call_timeout: Duration,
 }
 
 struct Running {
@@ -53,6 +61,8 @@ impl Connectors {
             running: Mutex::default(),
             starting: tokio::sync::Mutex::default(),
             revision: AtomicU64::default(),
+            start_timeout: START_TIMEOUT,
+            call_timeout: CALL_TIMEOUT,
         }
     }
 
@@ -136,12 +146,15 @@ impl Connectors {
                         names.join(", ")
                     );
                 };
-                let (client, tools) =
-                    McpClient::start(&connector.command, &connector.args, &connector.env)
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!("{} did not start: {error}", connector.name)
-                        })?;
+                // A start that times out is dropped, which stops the server,
+                // so the next enable starts it afresh.
+                let start = McpClient::start(&connector.command, &connector.args, &connector.env);
+                let (client, tools) = tokio::time::timeout(self.start_timeout, start)
+                    .await
+                    .map_err(|_| anyhow::anyhow!(stuck(&connector.name, self.start_timeout)))?
+                    .map_err(|error| {
+                        anyhow::anyhow!("{} did not start: {error}", connector.name)
+                    })?;
                 let running = Arc::new(Running {
                     name: connector.name.clone(),
                     client,
@@ -157,8 +170,13 @@ impl Connectors {
         };
         Ok(json!({
             "connector": running.name,
+            "note": format!(
+                "These tools are now on this server's tool list with its prefix, like the other \
+                 zeron tools: in Claude Code, mcp__zeron__{}__<tool>. If they do not appear, call \
+                 them through `connector_call`.",
+                running.name.to_lowercase()
+            ),
             "tools": running.tools().collect::<Vec<_>>(),
-            "note": "These tools are now on this server's tool list, under its prefix like the other zeron tools (mcp__zeron__… in Claude Code). If they do not appear, call them through `connector_call`.",
         }))
     }
 
@@ -187,8 +205,17 @@ impl Connectors {
         let running = self.running(connector).ok_or_else(|| {
             format!("connector {connector} is not enabled; call connector_enable first")
         })?;
-        running.client.call(tool, arguments).await
+        tokio::time::timeout(self.call_timeout, running.client.call(tool, arguments))
+            .await
+            .map_err(|_| stuck(&running.name, self.call_timeout))?
     }
+}
+
+fn stuck(connector: &str, timeout: Duration) -> String {
+    format!(
+        "{connector} didn't answer within {} s; it may be stuck — try again or ask the user to check {connector}",
+        timeout.as_secs()
+    )
 }
 
 #[cfg(test)]
@@ -201,7 +228,8 @@ mod tests {
     use crate::{Origin, Tools, Zeron};
 
     /// This test binary, run as a connector: a stdio MCP server with one
-    /// `echo` tool that logs each start to `$ZERON_FAKE_CONNECTOR`.
+    /// `echo` tool that logs each start to `$ZERON_FAKE_CONNECTOR`. It never
+    /// answers the method named in that log's `.hang` file, if any.
     #[test]
     fn fake_connector() {
         let Ok(log) = std::env::var("ZERON_FAKE_CONNECTOR") else {
@@ -210,11 +238,13 @@ mod tests {
         let mut starts = std::fs::read_to_string(&log).unwrap_or_default();
         starts.push_str("start\n");
         std::fs::write(&log, starts).unwrap();
+        let hang = std::fs::read_to_string(format!("{log}.hang")).unwrap_or_default();
         // The test harness may have left a partial line on stdout.
         println!();
         for line in std::io::stdin().lines() {
             let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
             let result = match request["method"].as_str() {
+                Some(method) if method == hang => continue,
                 Some("initialize") => {
                     json!({ "protocolVersion": "2025-06-18", "capabilities": {} })
                 }
@@ -272,12 +302,19 @@ mod tests {
     }
 
     fn tools(desktop: &Path) -> Arc<Tools> {
+        tools_with_timeout(desktop, START_TIMEOUT)
+    }
+
+    /// [`tools`], with `timeout` for both starts and calls.
+    fn tools_with_timeout(desktop: &Path, timeout: Duration) -> Arc<Tools> {
         let zeron = Zeron::new("ws://127.0.0.1:9".into(), Origin::default());
-        let connectors = Connectors::new(
+        let mut connectors = Connectors::new(
             Some(desktop.to_path_buf()),
             desktop.join(".claude.json"),
             desktop.to_path_buf(),
         );
+        connectors.start_timeout = timeout;
+        connectors.call_timeout = timeout;
         Arc::new(Tools::new(Arc::new(zeron)).with_connectors(connectors))
     }
 
@@ -432,5 +469,39 @@ mod tests {
             "connector Fake is not enabled; call connector_enable first"
         );
         assert!(!log.exists());
+    }
+
+    #[tokio::test]
+    async fn a_stuck_connector_times_out_and_a_retry_starts_it_again() {
+        let (desktop, log) = desktop();
+        let hang = format!("{}.hang", log.display());
+        let tools = tools_with_timeout(desktop.path(), Duration::from_secs(2));
+        let mut session = Session::new(tools);
+        let stuck = "Fake didn't answer within 2 s; it may be stuck — try again or ask the user to check Fake";
+
+        std::fs::write(&hang, "initialize").unwrap();
+        let (result, after) = session
+            .call("connector_enable", json!({ "name": "fake" }))
+            .await;
+        assert_eq!(text(&result), stuck);
+        assert!(after.is_empty());
+
+        std::fs::write(&hang, "tools/call").unwrap();
+        let (result, _) = session
+            .call("connector_enable", json!({ "name": "fake" }))
+            .await;
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "start\nstart\n");
+        for (name, arguments) in [
+            ("fake__echo", json!({})),
+            (
+                "connector_call",
+                json!({ "connector": "fake", "tool": "echo" }),
+            ),
+        ] {
+            let (result, _) = session.call(name, arguments).await;
+            assert_eq!(result["isError"], true);
+            assert_eq!(text(&result), stuck);
+        }
     }
 }
