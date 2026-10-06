@@ -1897,6 +1897,10 @@ pub struct Shell {
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
+    /// The active chat's `WatchArtifacts` on its host, keyed by chat and host.
+    artifact_watch: Option<((String, Option<String>), Task<()>)>,
+    /// An artifact the active chat's agent showed, opened on the next frame.
+    pending_artifact: Option<(String, zeron_proto::Artifact)>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -2352,6 +2356,8 @@ impl Shell {
             browser_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
+            artifact_watch: None,
+            pending_artifact: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -2929,6 +2935,7 @@ impl Shell {
                 changes.update(cx, |changes, cx| changes.ensure_content(cx));
             }
         }
+        self.watch_artifacts(cx);
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
                 if self.splash == SplashPhase::Visible {
@@ -3509,6 +3516,128 @@ impl Shell {
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
         outcome
+    }
+
+    /// Follow the active chat's `WatchArtifacts` on the device hosting it, so
+    /// its agent's `show` reaches this window wherever the chat runs.
+    fn watch_artifacts(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let host = state
+            .selected_chat_row()
+            .filter(|chat| chat.id == self.active_chat)
+            .map(|chat| chat.device_id.clone());
+        let key = (!self.active_chat.is_empty()).then(|| (self.active_chat.clone(), host));
+        if self.artifact_watch.as_ref().map(|(watched, _)| watched) == key.as_ref() {
+            return;
+        }
+        let engine = state.engine().cloned();
+        self.artifact_watch = key.zip(engine).map(|(key, engine)| {
+            let (chat_id, host) = key.clone();
+            let mut params = serde_json::json!({ "chatId": chat_id });
+            if let Some(host) = host {
+                params["targetDeviceId"] = host.into();
+            }
+            let task = cx.spawn(async move |this, cx| {
+                loop {
+                    if let Ok(mut artifacts) = engine
+                        .client()
+                        .subscribe_scoped(zeron_rpc::methods::WATCH_ARTIFACTS, params.clone())
+                        .await
+                    {
+                        while let Some(value) = artifacts.recv().await {
+                            let Ok(artifact) = serde_json::from_value(value) else {
+                                continue;
+                            };
+                            let shown = this.update(cx, |shell, cx| {
+                                shell.pending_artifact = Some((chat_id.clone(), artifact));
+                                cx.notify();
+                            });
+                            if shown.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                }
+            });
+            (key, task)
+        });
+    }
+
+    /// Open what the active chat's agent showed, the way the same link opens
+    /// from its transcript. A browser tab already on the page reloads it,
+    /// and an open file refocuses its tab (which follows the file on disk).
+    /// Pages and PDFs need a browser engine, so on the chat's own device
+    /// they open in the system's viewer; another device shows them as files.
+    /// A loopback page on another device opens through its preview address.
+    fn show_artifact(
+        &mut self,
+        chat_id: &str,
+        artifact: zeron_proto::Artifact,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::markdown::render::LinkOutcome {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let state = self.state.read(cx);
+        if chat_id != self.active_chat || state.selected_chat.as_deref() != Some(chat_id) {
+            return LinkOutcome::Rejected;
+        }
+        let local = state.chat_is_local(chat_id);
+        let url = match artifact {
+            zeron_proto::Artifact::File { path } => {
+                let system_viewer = path.rsplit_once('.').is_some_and(|(_, extension)| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "html" | "htm" | "pdf"
+                    )
+                });
+                let file = state
+                    .file_link_roots(chat_id)
+                    .first()
+                    .filter(|_| local && system_viewer)
+                    .and_then(|root| {
+                        url::Url::from_file_path(std::path::Path::new(&root.root).join(&path)).ok()
+                    });
+                if let Some(file) = file {
+                    return LinkOutcome::External(file.into());
+                }
+                self.add_file_surface(path, window, cx);
+                return LinkOutcome::Internal;
+            }
+            zeron_proto::Artifact::Url { url, preview } => {
+                match if local { Some(url) } else { preview } {
+                    Some(url) => url,
+                    None => return LinkOutcome::Rejected,
+                }
+            }
+        };
+        let open = self.right_tabs.get(&self.panel_key(cx)).and_then(|tabs| {
+            tabs.iter().find_map(|tab| match tab {
+                RightSurface::Browser(id)
+                    if self.browsers.get(id).is_some_and(|browser| {
+                        browser.read(cx).page.url.as_deref() == Some(url.as_str())
+                    }) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+        });
+        if let Some(id) = open {
+            self.set_surfaces_open(true, cx);
+            self.set_right_active(RightSurface::Browser(id), cx);
+            self.browsers[&id].update(cx, |browser, cx| browser.navigate(&url, window, cx));
+            return LinkOutcome::Internal;
+        }
+        self.activate_session_link(
+            &LinkActivation {
+                target: LinkTarget::new(&url, &url),
+                action: LinkAction::Internal,
+                source_session: Some(chat_id.to_owned()),
+            },
+            window,
+            cx,
+        )
     }
 
     /// Browser tabs are independent instances owned by the current session.
@@ -12452,6 +12581,12 @@ impl Render for Shell {
         settings::wallpaper::preload(cx);
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
+        if let Some((chat_id, artifact)) = self.pending_artifact.take()
+            && let crate::markdown::render::LinkOutcome::External(url) =
+                self.show_artifact(&chat_id, artifact, window, cx)
+        {
+            cx.open_url(&url);
+        }
         if let Some(command) = self.pending_workspace_command.take() {
             use crate::composer::WorkspaceCommand;
             match command {
@@ -15836,6 +15971,157 @@ mod exit_regressions {
                     Some(project_target.as_str())
                 );
                 assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+            })
+            .unwrap();
+    }
+
+    /// What an agent shows opens beside its own chat only: a workspace file
+    /// as a file tab that showing again refocuses, a page or PDF in the
+    /// system viewer on the chat's device, a page again in its open tab, and
+    /// another device's loopback page only through its preview address.
+    #[gpui::test]
+    fn shown_artifacts_open_beside_their_chat(cx: &mut TestAppContext) {
+        use crate::markdown::render::LinkOutcome;
+        use zeron_proto::Artifact;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("chat");
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("out/chart.svg"), "<svg/>").unwrap();
+        std::fs::write(root.join("out/page.html"), "<p>hi</p>").unwrap();
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let mut owner = super::tests::chat_with_path(Some(&root.to_string_lossy()), None);
+                owner.id = "owner".into();
+                owner.device_id = "local".into();
+                let mut remote = super::tests::chat_with_path(Some("/home/pc/chat"), None);
+                remote.id = "remote".into();
+                shell.active_chat = "owner".into();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.apply_chats(vec![owner, remote]);
+                    state.selected_chat = Some("owner".into());
+                });
+
+                let chart = Artifact::File {
+                    path: "out/chart.svg".into(),
+                };
+                assert_eq!(
+                    shell.show_artifact("owner", chart.clone(), window, cx),
+                    LinkOutcome::Internal
+                );
+                assert!(shell.right_pane_open(cx));
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("out/chart.svg")
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+                shell.show_artifact("owner", chart.clone(), window, cx);
+                assert_eq!(
+                    shell.file_surface_seq, id,
+                    "showing it again refocuses its tab"
+                );
+                assert_eq!(
+                    shell.show_artifact("remote", chart, window, cx),
+                    LinkOutcome::Rejected,
+                    "another chat's artifact never opens here"
+                );
+
+                let page = Artifact::File {
+                    path: "out/page.html".into(),
+                };
+                match shell.show_artifact("owner", page.clone(), window, cx) {
+                    LinkOutcome::External(url) => {
+                        assert!(url.starts_with("file:///"), "{url}");
+                        assert!(url.ends_with("chat/out/page.html"), "{url}");
+                    }
+                    other => panic!("{other:?}"),
+                }
+
+                let local = "http://localhost:5173/";
+                let preview = "http://web.pc.localhost:7331/";
+                let served = Artifact::Url {
+                    url: local.into(),
+                    preview: Some(preview.into()),
+                };
+                if cfg!(any(target_os = "macos", target_os = "linux")) {
+                    assert_eq!(
+                        shell.show_artifact("owner", served.clone(), window, cx),
+                        LinkOutcome::Internal
+                    );
+                    let tab = shell.browser_seq;
+                    assert_eq!(
+                        shell.browsers[&tab].read(cx).page.url.as_deref(),
+                        Some(local)
+                    );
+                    shell.show_artifact("owner", served.clone(), window, cx);
+                    assert_eq!(shell.browsers.len(), 1, "a shown page reloads in its tab");
+                } else {
+                    assert_eq!(
+                        shell.show_artifact("owner", served.clone(), window, cx),
+                        LinkOutcome::External(local.into())
+                    );
+                }
+
+                // The same artifacts from a chat hosted on another device.
+                shell.active_chat = "remote".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("remote".into());
+                });
+                assert_eq!(
+                    shell.show_artifact("remote", page, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("out/page.html")
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "remote");
+                let unserved = Artifact::Url {
+                    url: local.into(),
+                    preview: None,
+                };
+                assert_eq!(
+                    shell.show_artifact("remote", unserved, window, cx),
+                    LinkOutcome::Rejected,
+                    "this device's localhost is not the host's"
+                );
+                if !cfg!(any(target_os = "macos", target_os = "linux")) {
+                    assert_eq!(
+                        shell.show_artifact("remote", served, window, cx),
+                        LinkOutcome::External(preview.into())
+                    );
+                }
             })
             .unwrap();
     }

@@ -90,6 +90,13 @@ struct ChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ShowArtifactParams {
+    chat_id: String,
+    target: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
@@ -617,6 +624,7 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
+    artifacts: crate::artifacts::Artifacts,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -662,6 +670,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             previews: None,
+            artifacts: Default::default(),
             change_requests,
             diff_sync,
             uploads,
@@ -677,6 +686,12 @@ impl EngineRpc {
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
+        self
+    }
+
+    /// Share one artifact fan-out between the IPC and device-room services.
+    pub fn with_artifacts(mut self, artifacts: crate::artifacts::Artifacts) -> Self {
+        self.artifacts = artifacts;
         self
     }
 
@@ -1349,6 +1364,8 @@ fn forwardable(method: &str) -> bool {
             | methods::QUEUE_COMMAND
             | methods::TAKE_PROJECT_ACTION_SETUP
             | methods::WATCH_DOC_MESSAGES
+            // An agent shows artifacts through its own host's engine.
+            | methods::WATCH_ARTIFACTS
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
@@ -1443,6 +1460,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_ARTIFACTS
     )
 }
 
@@ -2207,6 +2225,36 @@ impl RpcService for EngineRpc {
             methods::WATCH_TRANSFERS => Ok(RpcReply::Stream(watch_stream(
                 self.doc_host.watch_transfers(),
             ))),
+            methods::SHOW_ARTIFACT => {
+                let p: ShowArtifactParams = parse_params(params)?;
+                let artifact = if p.target.contains("://") {
+                    let chat = self
+                        .workspace
+                        .chat(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .ok_or_else(|| RpcError::Failed("chat not found".into()))?;
+                    if chat.device_id != self.doc_host.device_id() {
+                        return Err(RpcError::Failed("chat belongs to another device".into()));
+                    }
+                    crate::artifacts::page(&p.target, self.previews.as_ref())
+                        .map_err(RpcError::BadParams)?
+                } else {
+                    let path = tokio::time::timeout(
+                        crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                        self.workspace_files.artifact_path(&p.chat_id, &p.target),
+                    )
+                    .await
+                    .map_err(|_| RpcError::Failed("workspace file check timed out".into()))?
+                    .map_err(RpcError::from)?;
+                    zeron_proto::Artifact::File { path }
+                };
+                let windows = self.artifacts.show(&p.chat_id, artifact.clone());
+                RpcReply::value(&serde_json::json!({ "artifact": artifact, "windows": windows }))
+            }
+            methods::WATCH_ARTIFACTS => {
+                let p: ChatParams = parse_params(params)?;
+                Ok(RpcReply::Stream(self.artifacts.watch(&p.chat_id)))
+            }
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self
@@ -3815,6 +3863,8 @@ mod tests {
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
+        assert!(!forwardable(methods::SHOW_ARTIFACT));
+        assert!(forwardable(methods::WATCH_ARTIFACTS));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

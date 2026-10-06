@@ -903,3 +903,102 @@ async fn absolute_paths_read_inside_normally_and_outside_read_only() {
     );
     core.shutdown().await;
 }
+
+/// `ShowArtifact` checks the target against the chat's folder and hands it to
+/// every window watching that chat, whichever RPC service (IPC or device
+/// room) the window subscribed through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn show_artifact_validates_and_reaches_the_chats_watchers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let folder = temp.path().join("chat");
+    std::fs::create_dir_all(folder.join("out")).expect("chat folder");
+    std::fs::write(folder.join("out/chart.svg"), "<svg/>").expect("artifact");
+    std::fs::write(temp.path().join("secret.txt"), "secret").expect("outside file");
+    let core = assemble(&temp.path().join("data"), "device-artifacts");
+    for chat in ["chat-art", "chat-other"] {
+        core.workspace
+            .create_chat(
+                chat,
+                None,
+                Some(&core.device_id),
+                None,
+                Some(folder.to_string_lossy().into_owned()),
+            )
+            .expect("chat");
+    }
+    let agent = zeron_rpc::memory_client(core.rpc_service());
+    let window = zeron_rpc::memory_client(core.rpc_service());
+    let mut watch = window
+        .subscribe_scoped(
+            methods::WATCH_ARTIFACTS,
+            serde_json::json!({ "chatId": "chat-art" }),
+        )
+        .await
+        .expect("watch artifacts");
+
+    // The watch is quiet until something is shown, so poll until the
+    // engine has registered it.
+    let reply = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let reply = agent
+                .call(
+                    methods::SHOW_ARTIFACT,
+                    serde_json::json!({ "chatId": "chat-art", "target": "out/chart.svg" }),
+                )
+                .await
+                .expect("show file");
+            if reply["windows"] == 1 {
+                return reply;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the window's watch registers");
+    assert_eq!(
+        reply["artifact"],
+        serde_json::json!({ "kind": "file", "path": "out/chart.svg" })
+    );
+    let shown = tokio::time::timeout(Duration::from_secs(3), watch.recv())
+        .await
+        .expect("artifact timeout")
+        .expect("watch alive");
+    assert_eq!(shown, reply["artifact"]);
+
+    let reply = agent
+        .call(
+            methods::SHOW_ARTIFACT,
+            serde_json::json!({ "chatId": "chat-other", "target": "http://localhost:5173/" }),
+        )
+        .await
+        .expect("show page");
+    assert_eq!(reply["windows"], 0, "nobody watches the other chat");
+    assert_eq!(reply["artifact"]["kind"], "url");
+
+    let outside = temp.path().join("secret.txt");
+    let outside = outside.to_string_lossy();
+    for (chat, target, error) in [
+        ("chat-art", "../secret.txt", "outside this chat's workspace"),
+        ("chat-art", &outside, "outside this chat's workspace"),
+        ("chat-art", "https://example.com/", "not a local page"),
+        ("chat-art", "missing.html", "does not exist"),
+        ("chat-missing", "out/chart.svg", "chat not found"),
+        ("chat-missing", "http://localhost:5173/", "chat not found"),
+    ] {
+        let result = agent
+            .call(
+                methods::SHOW_ARTIFACT,
+                serde_json::json!({ "chatId": chat, "target": target }),
+            )
+            .await;
+        let message = result.expect_err(target).to_string();
+        assert!(message.contains(error), "{target}: {message}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), watch.recv())
+            .await
+            .is_err(),
+        "rejected targets and other chats never reach the window"
+    );
+    core.shutdown().await;
+}

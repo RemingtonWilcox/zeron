@@ -34,6 +34,13 @@ pub use server::{serve_connection, serve_ws_listener};
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
+    /// A chat's agent shows a workspace file or loopback page beside the chat,
+    /// `{chatId, target}` → `{artifact, windows}` (`zeron_proto::Artifact`;
+    /// `windows` is how many were watching). IPC-only: the agent's own host.
+    pub const SHOW_ARTIFACT: &str = "ShowArtifact";
+    /// Every `ShowArtifact` for `{chatId}`, as it happens. Served by the
+    /// chat's host; other devices reach it through `targetDeviceId`.
+    pub const WATCH_ARTIFACTS: &str = "WatchArtifacts";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
