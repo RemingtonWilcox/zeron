@@ -277,6 +277,14 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
+            // Already running (perhaps with its window closed): bring that
+            // one forward. A deep link still starts its own viewport.
+            #[cfg(windows)]
+            if cli.open_url.is_none()
+                && zeron_ui::windows_presence::signal_running(&paths::data_dir())
+            {
+                return Ok(());
+            }
             let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).

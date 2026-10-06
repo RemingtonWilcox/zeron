@@ -63,6 +63,8 @@ pub mod syntax_cache;
 pub mod terminal;
 mod todo_panel;
 pub mod theme;
+#[cfg(windows)]
+pub mod windows_presence;
 pub mod theme_library;
 pub mod transcript;
 pub mod typography;
@@ -228,6 +230,8 @@ pub fn run_app(config: UiConfig) {
         // doc snapshots before the process exits (remote engines outlive us).
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
+            #[cfg(windows)]
+            windows_presence::stop();
             settings::flush(cx);
             app_update::install_on_quit(cx);
             let shutdown =
@@ -249,6 +253,21 @@ pub fn run_app(config: UiConfig) {
         open_main_window(state, config.boot(), cx);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         start_appshot_service(config.boot().data_dir, cx);
+        // Windows has no Dock: the tray and a second launch are how a closed
+        // window comes back.
+        #[cfg(windows)]
+        {
+            let mut presence = windows_presence::start(&config.boot().data_dir);
+            cx.spawn(async move |cx| {
+                while let Some(request) = presence.next().await {
+                    cx.update(|cx| match request {
+                        windows_presence::Request::Show => show_main_window(cx),
+                        windows_presence::Request::Quit => app_menus::request_quit(cx),
+                    });
+                }
+            })
+            .detach();
+        }
         // Native menu bar — macOS gets the standard app menu (About/Services/
         // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
         // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
@@ -272,9 +291,31 @@ pub(crate) fn activate_main_window(cx: &mut App) {
     }
 }
 
-/// A clicked banner: bring Zeron forward on its chat or settings destination,
-/// reopening the main window first if ⌘W closed it.
-fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+/// Reopen the main window if it was closed and raise it. `cx.activate` alone
+/// does nothing on Windows; the window itself has to come forward.
+#[cfg(windows)]
+fn show_main_window(cx: &mut App) {
+    activate_main_window(cx);
+    if let Some(shell) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>())
+    {
+        let _ = shell.update(cx, |_, window, _| {
+            windows_presence::unhide(window);
+            window.activate_window();
+        });
+    }
+}
+
+/// Bring Zeron forward on a clicked banner's chat or settings destination, or
+/// the chat a finished sign-in returns to, reopening the main window first if
+/// ⌘W closed it.
+pub(crate) fn open_notification_target(
+    target: String,
+    state: &gpui::Entity<state::AppState>,
+    cx: &mut App,
+) {
     activate_main_window(cx);
     let shell = cx
         .windows()
@@ -283,6 +324,8 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
     match shell {
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
+                #[cfg(windows)]
+                windows_presence::unhide(window);
                 window.activate_window();
                 if target == notify::AGENT_UPDATES_TARGET {
                     shell.open_settings(shell::SettingsSection::Harnesses, cx);
@@ -441,6 +484,13 @@ fn open_main_window(
                 save_main_window_geometry(window, cx);
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
+                    // Windows: the close button hides to the tray, like a
+                    // Dock-kept macOS app; Quit is the tray menu or Ctrl+Q.
+                    #[cfg(windows)]
+                    if windows_presence::hide_to_tray(window) {
+                        save_window_geometry(window, false, cx);
+                        return false;
+                    }
                     let should_close = weak_shell
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
                         .unwrap_or(true);
