@@ -636,6 +636,15 @@ impl Engine {
         );
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
+            // A token relay's bearer is a shared secret, not an identity:
+            // ZERON_USER_ID then names the user, so the secret never becomes
+            // a user id, profile folder or displayed account.
+            if let Ok(user) = std::env::var("ZERON_USER_ID")
+                && !user.trim().is_empty()
+            {
+                auth_config.dev_user_id = user;
+                auth_config.dev_bearer = Some(token.clone());
+            }
         }
         Auth::new(auth_config)
     }
