@@ -91,15 +91,25 @@ fn resized(
 }
 
 /// Whether `chat` is a general chat: it runs in the general-chat folder under
-/// `data_dir`.
+/// `data_dir`, or, for a chat hosted on another device (whose data dir is
+/// unknown here), in a `general-chat` folder directly inside a Zeron data dir
+/// (`…\Zeron\general-chat` on Windows, `~/.zeron/general-chat` elsewhere). Only
+/// the sidebar uses this; the harness keeps its exact-path check.
 pub(crate) fn is_general_chat(
     chat: &zeron_proto::Chat,
     data_dir: Option<&std::path::Path>,
 ) -> bool {
-    chat.cwd
-        .as_deref()
-        .zip(data_dir)
-        .is_some_and(|(cwd, data_dir)| zeron_proto::is_general_chat_dir(cwd, data_dir))
+    let Some(cwd) = chat.cwd.as_deref() else {
+        return false;
+    };
+    if data_dir.is_some_and(|data_dir| zeron_proto::is_general_chat_dir(cwd, data_dir)) {
+        return true;
+    }
+    let mut parts = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']);
+    parts.next() == Some(zeron_proto::GENERAL_CHAT_DIR)
+        && parts
+            .next()
+            .is_some_and(|parent| parent.trim_start_matches('.').eq_ignore_ascii_case("zeron"))
 }
 
 /// Create the general-chat folder and its agent instructions when missing.
@@ -567,10 +577,16 @@ mod tests {
         // A project folder that shares the name is a coding session.
         assert!(!general(Some("/home/me/code/general-chat")));
         assert!(!general(None));
-        assert!(!is_general_chat(
+        // Hosted on another device: recognized by its place in a Zeron data dir.
+        assert!(general(Some(
+            r"C:\Users\me\AppData\Local\Zeron\general-chat"
+        )));
+        assert!(general(Some("/Users/me/.zeron/general-chat/")));
+        assert!(is_general_chat(
             &chat(Some("/home/me/.zeron/general-chat")),
             None
         ));
+        assert!(!general(Some(r"C:\code\zeron-app\general-chat")));
     }
 
     #[test]
