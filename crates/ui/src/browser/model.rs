@@ -11,9 +11,42 @@ pub(super) fn native_shortcut_key(characters: &str) -> &str {
     }
 }
 
+/// Browser chords that a focused page hands back to GPUI.
+#[cfg(any(target_os = "macos", windows, test))]
+pub(super) fn browser_shortcut(combo: &str) -> bool {
+    let key = combo.strip_prefix(if cfg!(target_os = "macos") {
+        "cmd-"
+    } else {
+        "ctrl-"
+    });
+    matches!(
+        key,
+        Some("l" | "t" | "w" | "[" | "]" | "shift-r" | "k" | ",")
+    )
+}
+
+/// Finds a loaded page's icon URL; Zeron downloads the icon itself.
+#[cfg(any(target_os = "macos", windows))]
+pub(super) const FAVICON_SCRIPT: &str = "(() => { const link = document.querySelector('link[rel~=icon]'); return link ? link.href : new URL('/favicon.ico', location.href).href; })()";
+
 #[cfg(test)]
 mod native_shortcut_tests {
     use super::*;
+
+    #[test]
+    fn browser_chords_use_the_platform_modifier_only() {
+        let primary = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        for key in ["l", "t", "w", "[", "]", "shift-r", "k", ","] {
+            assert!(browser_shortcut(&format!("{primary}-{key}")), "{key}");
+        }
+        for combo in ["alt-l", "l", "ctrl-alt-l", "cmd-ctrl-w", "ctrl-shift-t"] {
+            assert!(!browser_shortcut(combo), "{combo}");
+        }
+    }
 
     #[test]
     fn native_tabs_match_the_configured_navigation_keystrokes() {

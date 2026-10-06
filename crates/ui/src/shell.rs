@@ -3504,7 +3504,8 @@ impl Shell {
                 LinkAction::External
             };
         }
-        let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
+        let outcome =
+            resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
         if outcome == LinkOutcome::Internal {
             self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
@@ -12575,7 +12576,7 @@ impl Render for Shell {
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
         let browser_dragging = cx.has_active_drag();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let browser_resize_inset = if self.right_pane_open(cx)
             && !self.right_pane_expanded
             && !self.tween_active(self.right_tween)
@@ -12585,7 +12586,7 @@ impl Render for Shell {
         } else {
             px(0.0)
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let browser_overlay_width = px(if self.files_visible_width(cx) > 0.0 {
             self.files_visible_width(cx) + PANE_RESIZE_HITBOX_HALF_WIDTH
         } else {
@@ -12598,7 +12599,7 @@ impl Render for Shell {
                 browser_dragging,
             );
             browser.update(cx, |browser, cx| {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 {
                     browser.set_resize_inset(browser_resize_inset, cx);
                     browser.set_right_occlusion(browser_overlay_width, cx);

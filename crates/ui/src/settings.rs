@@ -350,6 +350,13 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+/// Zeron's device-local data directory, once settings are initialized.
+#[cfg(windows)]
+pub(crate) fn data_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+}
+
 /// Read the picker preference without cloning the full settings for each model row.
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()

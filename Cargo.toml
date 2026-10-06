@@ -174,13 +174,15 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
-# Whole-window scaling patch; also applies to gpui-base's GPUI dependency so
-# the application and component layer share one GPUI type universe. The rev is
-# GitHub's merge of zeronsh/zui#14 into the zui rev above; the `git@` user only
-# makes Cargo treat the URL as a different source, so it accepts the patch.
-# Remove after the patch is merged and the upstream revision is updated.
+# Whole-window scaling (zeronsh/zui#14) and, on Windows, native child windows
+# beneath deferred GPUI content. The rev is GitHub's merge of zeronsh/zui#14
+# into the zui rev above plus the Windows scene overlay, on the fork's
+# `personal-windows-browser` branch. This also applies to gpui-base's GPUI
+# dependency so the application and component layer share one GPUI type
+# universe. Remove after both changes are merged and the upstream revision is
+# updated.
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
-gpui_platform = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
-gpui_tokio = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
-gpui_macros = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
+gpui = { git = "https://github.com/RemingtonWilcox/zui", rev = "f36505c1d485198ce3da60792d4a7b26459397da" }
+gpui_platform = { git = "https://github.com/RemingtonWilcox/zui", rev = "f36505c1d485198ce3da60792d4a7b26459397da" }
+gpui_tokio = { git = "https://github.com/RemingtonWilcox/zui", rev = "f36505c1d485198ce3da60792d4a7b26459397da" }
+gpui_macros = { git = "https://github.com/RemingtonWilcox/zui", rev = "f36505c1d485198ce3da60792d4a7b26459397da" }

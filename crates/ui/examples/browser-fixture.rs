@@ -21,6 +21,8 @@ async fn pause(cx: &mut AsyncApp, ms: u64) {
 
 fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     let path = directory.join(format!("{name}.png"));
+    #[cfg(windows)]
+    return print_window(&path);
     #[cfg(target_os = "macos")]
     let status = {
         let app = objc2_app_kit::NSApplication::sharedApplication(
@@ -35,7 +37,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
             .arg(&path)
             .status()?
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     let status = {
         let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
@@ -60,7 +62,72 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
             .arg(&path)
             .status()?
     };
+    #[cfg(not(windows))]
     anyhow::ensure!(status.success(), "screenshot capture failed");
+    #[cfg(not(windows))]
+    Ok(())
+}
+
+/// Renders this process's window off-screen, so other windows on the desktop
+/// are never captured and no input is sent.
+#[cfg(windows)]
+fn print_window(path: &std::path::Path) -> anyhow::Result<()> {
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, RECT},
+        Graphics::Gdi::*,
+        Storage::Xps::{PRINT_WINDOW_FLAGS, PW_CLIENTONLY, PrintWindow},
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
+        },
+    };
+    unsafe extern "system" fn find(hwnd: HWND, found: LPARAM) -> windows::core::BOOL {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid != std::process::id() || !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return true.into();
+        }
+        unsafe { *(found.0 as *mut HWND) = hwnd };
+        false.into()
+    }
+    unsafe {
+        let mut hwnd = HWND::default();
+        let _ = EnumWindows(Some(find), LPARAM(&mut hwnd as *mut HWND as isize));
+        anyhow::ensure!(!hwnd.is_invalid(), "fixture window is not available");
+        let mut rect = RECT::default();
+        GetClientRect(hwnd, &mut rect)?;
+        let (width, height) = (rect.right, rect.bottom);
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        let previous = SelectObject(dc, bitmap.into());
+        // PW_RENDERFULLCONTENT includes DirectComposition and child content.
+        let printed = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(PW_CLIENTONLY.0 | 2)).as_bool();
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        GetDIBits(dc, bitmap, 0, height as u32, Some(pixels.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+        SelectObject(dc, previous);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+        anyhow::ensure!(printed, "PrintWindow failed");
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+            .ok_or_else(|| anyhow::anyhow!("invalid capture"))?
+            .save(path)?;
+    }
     Ok(())
 }
 
@@ -133,13 +200,26 @@ fn main() -> anyhow::Result<()> {
     let data = temp.path().to_path_buf();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let _origin = format!("http://{}", listener.local_addr()?);
+    let mut favicon = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([0x29, 0x48, 0x3b, 0xff]))
+        .write_to(&mut favicon, image::ImageFormat::Png)?;
+    let favicon = favicon.into_inner();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut request = [0; 4096];
             let n = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..n]);
-            let (title, html) = if request.starts_with("GET /two ") {
+            if request.starts_with("GET /favicon.ico ") {
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", favicon.len());
+                let _ = stream.write_all(&favicon);
+                continue;
+            }
+            let missing = request.starts_with("GET /missing ");
+            let status = if missing { "404 Not Found" } else { "200 OK" };
+            let (title, html) = if missing {
+                ("Not found", "<h1>Nothing here.</h1><p>This is the server’s own 404 page.</p>")
+            } else if request.starts_with("GET /two ") {
                 (
                     "Details",
                     "<a href='/'>Back to overview</a><h1>A closer look.</h1><p>Independent navigation, right beside your work.</p>",
@@ -155,7 +235,7 @@ fn main() -> anyhow::Result<()> {
             );
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -211,7 +291,7 @@ fn main() -> anyhow::Result<()> {
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
                 capture(&output, "browser-empty-dark")?;
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                 {
                     window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
                     let deadline = std::time::Instant::now() + Duration::from_secs(25);
@@ -241,7 +321,7 @@ fn main() -> anyhow::Result<()> {
                 let (second_id, second) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 250).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "background page stayed visible");
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                 {
                     first.read_with(cx, |b, _| b.fixture_eval("document.cookie = 'browserfixture=shared; path=/'"));
                     window.update(cx, |_, w, cx| second.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
@@ -331,8 +411,42 @@ fn main() -> anyhow::Result<()> {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
+                    #[cfg(windows)]
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_native_visible() && b.fixture_page_input_blocked()), "open menu hid the page or left it taking input");
                     capture(&output, "browser-menu-dark")?;
+                    // Menus over a live page, in each appearance.
+                    #[cfg(windows)]
+                    for (mode, surface, name) in [
+                        (appearance::AppearanceMode::Dark, zeron_theme::SurfacePreference::Opaque, "browser-menu-opaque-dark"),
+                        (appearance::AppearanceMode::Light, zeron_theme::SurfacePreference::Frosted, "browser-menu-light"),
+                        (appearance::AppearanceMode::Light, zeron_theme::SurfacePreference::Opaque, "browser-menu-opaque-light"),
+                    ] {
+                        cx.update(|cx| { appearance::set_mode(mode, cx); appearance::set_surface(surface, cx); });
+                        pause(cx, 500).await;
+                        capture(&output, name)?;
+                    }
+                    #[cfg(windows)]
+                    cx.update(|cx| { appearance::set_mode(appearance::AppearanceMode::Dark, cx); appearance::set_surface(zeron_theme::SurfacePreference::Frosted, cx); });
                     window.update(cx, |shell, _, cx| shell.fixture_browser_menu(false, cx))?;
+                    #[cfg(windows)]
+                    {
+                        pause(cx, 300).await;
+                        anyhow::ensure!(!first.read_with(cx, |b,_| b.fixture_page_input_blocked()), "page input was not restored after the menu closed");
+                        // A passive tooltip and the command palette over the live page.
+                        for position in [gpui::point(px(557.), px(57.)), gpui::point(px(100.), px(300.))] {
+                            gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers: Default::default() }), cx); })?;
+                            if position.x == px(557.) {
+                                pause(cx, 1500).await;
+                                anyhow::ensure!(!first.read_with(cx, |b,_| b.fixture_page_input_blocked()), "a passive tooltip took page input");
+                                capture(&output, "browser-tooltip-dark")?;
+                            }
+                        }
+                        for _ in 0..2 {
+                            window.update(cx, |_, w, cx| w.dispatch_action(Box::new(shell::ToggleCommandPalette), cx))?;
+                            pause(cx, 700).await;
+                            if first.read_with(cx, |b,_| b.fixture_page_input_blocked()) { capture(&output, "browser-palette-dark")?; }
+                        }
+                    }
                 }
                 pause(cx, 500).await;
                 #[cfg(target_os = "macos")]
@@ -470,7 +584,7 @@ fn main() -> anyhow::Result<()> {
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
                 capture(&output, "browser-light")?;
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                 {
                     anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_native_visible()), "page not restored after overlays/takeover");
                     // Use an ordinary closed localhost port. Port 1 is on
@@ -486,6 +600,51 @@ fn main() -> anyhow::Result<()> {
                     }
                     pause(cx, 300).await; capture(&output, "browser-error-light")?;
                 }
+                #[cfg(windows)]
+                {
+                    // A server's own error page shows instead of Zeron's load error.
+                    let missing = format!("{_origin}/missing");
+                    window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&missing, w, cx)))?;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                    while !first.read_with(cx, |b, _| b.page.title == "Not found" && !b.page.loading) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "404 page did not load: {:?}", first.read_with(cx, |b, _| b.page.clone())); pause(cx, 50).await;
+                    }
+                    anyhow::ensure!(first.read_with(cx, |b, _| b.page.error.is_none() && b.fixture_native_visible()), "404 page was replaced by a load error");
+                    pause(cx, 300).await; capture(&output, "browser-404-light")?;
+                    // Preview hostnames need *.localhost to reach loopback without a proxy.
+                    let preview = _origin.replace("127.0.0.1", "fixture.localhost");
+                    window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&preview, w, cx)))?;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                    while !first.read_with(cx, |b, _| b.page.title == "Fieldnotes" && !b.page.loading && b.page.error.is_none()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "*.localhost did not resolve to loopback: {:?}", first.read_with(cx, |b, _| b.page.clone())); pause(cx, 50).await;
+                    }
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while first.read_with(cx, |b, _| b.favicon.is_none()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "favicon was not fetched"); pause(cx, 50).await;
+                    }
+                    // The page follows layout × display density × UI scale, while
+                    // its CSS pixels keep the display density.
+                    let mut widths = Vec::new();
+                    for percent in [100, 125] {
+                        window.update(cx, |shell, w, cx| { ui_scale::apply_to_window(percent, w); shell.fixture_resize_browser(400., cx); })?;
+                        pause(cx, 500).await;
+                        let physical = first.read_with(cx, |b, _| b.fixture_physical_width());
+                        first.read_with(cx, |b, _| b.fixture_eval(&format!("document.title = 'Viewport{percent}:' + Math.round(innerWidth * devicePixelRatio)")));
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        loop {
+                            let title = first.read_with(cx, |b, _| b.page.title.clone());
+                            if let Some(css) = title.strip_prefix(&format!("Viewport{percent}:")).and_then(|v| v.parse::<i32>().ok()) {
+                                anyhow::ensure!((css - physical).abs() <= 2, "CSS viewport {css} does not fill the page {physical} at {percent}%");
+                                break;
+                            }
+                            anyhow::ensure!(std::time::Instant::now() < deadline, "viewport measurement timed out"); pause(cx, 50).await;
+                        }
+                        widths.push(physical as f32);
+                        if percent == 125 { capture(&output, "browser-scale-125-light")?; }
+                    }
+                    anyhow::ensure!((widths[1] / widths[0] - 1.25).abs() < 0.01, "page width did not follow UI scale: {widths:?}");
+                    window.update(cx, |_, w, _| ui_scale::apply_to_window(100, w))?;
+                }
                 // Reject arbitrary schemes while preserving the existing page.
                 let before = first.read_with(cx, |b, _| b.page.url.clone());
                 window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("javascript:alert(1)", w, cx)))?;
@@ -493,7 +652,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");
-                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
+                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure. On Windows: live DOM navigation, history, same-document state, shared ephemeral data, menu input capture, server error pages, *.localhost, favicons, UI scale and load failure.\n")?;
                 Ok(())
             }.await;
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
