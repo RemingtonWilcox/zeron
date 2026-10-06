@@ -32,6 +32,7 @@
 //!   interrupt control request, then escalates to SIGTERM and SIGKILL.
 
 pub mod catalog;
+pub mod desktop_extensions;
 mod discovery;
 mod normalize;
 mod wire;

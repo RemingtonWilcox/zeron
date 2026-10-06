@@ -3,8 +3,9 @@
 //! `zeron mcp` speaks MCP (JSON-RPC 2.0, newline-delimited) on stdin/stdout
 //! and proxies every tool into the engine's localhost IPC — the same
 //! `zeron_rpc` WebSocket the headed app and `zeron sync` dial. Nothing here
-//! talks to the edge or touches the filesystem: the engine stays the single
-//! authority for chats, devices, projects, and the command plane.
+//! talks to the edge: the engine stays the single authority for chats,
+//! devices, projects, and the command plane. The one local read is the
+//! user's connectors (see [`connectors`]), started only when an agent asks.
 //!
 //! The server is hand-rolled rather than an SDK: the MCP surface a stdio
 //! tool server needs is five methods (`initialize`, `ping`, `tools/list`,
@@ -16,6 +17,7 @@
 //! environment. Every send from such an agent is then attributed to its
 //! originating chat, and a chat can never message itself.
 
+mod connectors;
 mod jsonrpc;
 mod tools;
 mod transcript;

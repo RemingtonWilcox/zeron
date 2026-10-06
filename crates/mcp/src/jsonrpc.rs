@@ -2,14 +2,16 @@
 //!
 //! Requests are handled concurrently (a `wait_for_turn` may block for
 //! minutes while the client keeps pinging); responses are serialized through
-//! one writer task so frames never interleave. Notifications from the client
+//! one writer task so frames never interleave. A request that changed the
+//! tool list (a connector started) is followed by
+//! `notifications/tools/list_changed`. Notifications from the client
 //! (`notifications/initialized`, `notifications/cancelled`) are accepted and
 //! ignored — there is no server-side state to initialize or cancel.
 
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::tools::Tools;
@@ -52,9 +54,16 @@ const INVALID_PARAMS: i64 = -32602;
 
 /// Serve MCP on this process's stdin/stdout until stdin closes.
 pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
+    serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+pub(crate) async fn serve(
+    tools: Arc<Tools>,
+    input: impl AsyncRead + Unpin,
+    mut stdout: impl AsyncWrite + Unpin + Send + 'static,
+) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
     let writer = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
         while let Some(line) = out_rx.recv().await {
             if stdout.write_all(line.as_bytes()).await.is_err()
                 || stdout.write_all(b"\n").await.is_err()
@@ -65,7 +74,7 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
         }
     });
 
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut lines = BufReader::new(input).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
         if line.is_empty() {
@@ -114,8 +123,14 @@ fn route(tools: &Arc<Tools>, message: Value, out: &mpsc::Sender<String>) -> Opti
             let tools = tools.clone();
             let out = out.clone();
             tokio::spawn(async move {
+                let revision = tools.revision();
                 let response = handle_request(&tools, id, &method, params).await;
                 let _ = out.send(response.to_string()).await;
+                if tools.revision() != revision {
+                    let changed =
+                        json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+                    let _ = out.send(changed.to_string()).await;
+                }
             });
             None
         }
@@ -147,16 +162,20 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             } else {
                 LATEST_PROTOCOL
             };
+            let instructions = match tools.connector_instructions() {
+                Some(connectors) => format!("{INSTRUCTIONS}\n\n{connectors}"),
+                None => INSTRUCTIONS.to_owned(),
+            };
             ok_response(
                 id,
                 json!({
                     "protocolVersion": version,
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": { "tools": { "listChanged": true } },
                     "serverInfo": {
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions,
                 }),
             )
         }
@@ -173,15 +192,19 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match tools.call(name, arguments).await {
-                Ok(value) => ok_response(
-                    id,
+            let result = if tools.proxies(name) {
+                tools.proxy(name, arguments).await
+            } else {
+                tools.call(name, arguments).await.map(|value| {
                     json!({
                         "content": [{ "type": "text", "text": pretty(&value) }],
                         "structuredContent": wrap_structured(value),
                         "isError": false,
-                    }),
-                ),
+                    })
+                })
+            };
+            match result {
+                Ok(result) => ok_response(id, result),
                 Err(message) => ok_response(
                     id,
                     json!({
