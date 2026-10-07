@@ -91,6 +91,7 @@ fn claude(projects: &Path, session_id: &str) -> Option<ChatTokenUsage> {
                 output: count(usage, "output_tokens"),
                 cache_read: count(usage, "cache_read_input_tokens"),
                 cache_write: count(usage, "cache_creation_input_tokens"),
+                ..Default::default()
             },
         );
     }
@@ -132,6 +133,7 @@ fn codex(root: &Path, session_id: &str) -> Option<ChatTokenUsage> {
             output: count(usage, "output_tokens"),
             cache_read: cached,
             cache_write: count(usage, "cache_write_input_tokens"),
+            ..Default::default()
         };
     }
     Some(total)
@@ -157,6 +159,7 @@ fn pi(file: &Path) -> Option<ChatTokenUsage> {
             output: count(usage, "output"),
             cache_read: count(usage, "cacheRead"),
             cache_write: count(usage, "cacheWrite"),
+            ..Default::default()
         });
     }
     Some(total)
@@ -215,7 +218,8 @@ mod tests {
                 input: 30,
                 output: 15,
                 cache_read: 300,
-                cache_write: 60
+                cache_write: 60,
+                ..Default::default()
             }
         );
         assert!(claude(dir.path(), "missing").is_none());
@@ -239,7 +243,8 @@ mod tests {
                 input: 200,
                 output: 70,
                 cache_read: 300,
-                cache_write: 0
+                cache_write: 0,
+                ..Default::default()
             })
         );
         assert!(codex(dir.path(), "019f").is_none(), "ids match whole");
@@ -257,7 +262,8 @@ mod tests {
                 input: 14,
                 output: 6,
                 cache_read: 100,
-                cache_write: 4
+                cache_write: 4,
+                ..Default::default()
             })
         );
     }

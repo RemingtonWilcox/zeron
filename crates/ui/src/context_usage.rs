@@ -165,16 +165,35 @@ fn compact(count: u64) -> String {
     }
 }
 
-/// The chat's running bill, in the providers' own terms: every provider
-/// session it used, cache included.
-fn chat_rows(usage: ChatTokenUsage) -> [(&'static str, String); 5] {
-    [
+/// The engine's estimate of the chat's share of the weekly limit: `~6.2%`,
+/// `<0.1%` for a sliver.
+fn week_share(ppm: u64) -> String {
+    let percent = ppm as f64 / 10_000.0;
+    if percent < 0.1 {
+        "<0.1%".into()
+    } else if percent < 10.0 {
+        format!("~{percent:.1}%")
+    } else {
+        format!("~{percent:.0}%")
+    }
+}
+
+/// The chat's running bill: its estimated share of the weekly limit when
+/// one has been measured, then the providers' own counts across every
+/// provider session it used, cache included.
+fn chat_rows(usage: ChatTokenUsage) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if usage.week_ppm > 0 {
+        rows.push(("Weekly limit", week_share(usage.week_ppm)));
+    }
+    rows.extend([
         ("Total", compact(usage.total())),
         ("Output", compact(usage.output)),
         ("Input", compact(usage.input)),
         ("Cache read", compact(usage.cache_read)),
         ("Cache write", compact(usage.cache_write)),
-    ]
+    ]);
+    rows
 }
 
 /// Why a long chat's total dwarfs what was written: every step re-sends the
@@ -185,23 +204,20 @@ fn cache_note(usage: ChatTokenUsage) -> Option<&'static str> {
 }
 
 fn usage_table(usage: ChatTokenUsage, theme: &Theme) -> gpui::Div {
-    let rows = chat_rows(usage)
-        .into_iter()
-        .enumerate()
-        .map(|(ix, (label, value))| {
-            div()
-                .flex()
-                .flex_row()
-                .justify_between()
-                .gap(px(24.0))
-                .text_color(if ix == 0 {
-                    theme.text
-                } else {
-                    theme.text_muted
-                })
-                .child(SharedString::from(label))
-                .child(SharedString::from(value))
-        });
+    let rows = chat_rows(usage).into_iter().map(|(label, value)| {
+        div()
+            .flex()
+            .flex_row()
+            .justify_between()
+            .gap(px(24.0))
+            .text_color(if matches!(label, "Weekly limit" | "Total") {
+                theme.text
+            } else {
+                theme.text_muted
+            })
+            .child(SharedString::from(label))
+            .child(SharedString::from(value))
+    });
     div()
         .px(px(8.0))
         .pb(px(6.0))
@@ -271,9 +287,16 @@ mod tests {
             output: 34_000,
             cache_read: 5_000_000,
             cache_write: 80_000,
+            ..Default::default()
+        };
+        let rows = |usage| {
+            chat_rows(usage)
+                .into_iter()
+                .map(|(label, value)| format!("{label} {value}"))
+                .collect::<Vec<_>>()
         };
         assert_eq!(
-            chat_rows(usage).map(|(label, value)| format!("{label} {value}")),
+            rows(usage),
             [
                 "Total 5.1M",
                 "Output 34.0K",
@@ -282,6 +305,13 @@ mod tests {
                 "Cache write 80.0K"
             ]
         );
+        let measured = ChatTokenUsage {
+            week_ppm: 62_000,
+            ..usage
+        };
+        assert_eq!(rows(measured)[0], "Weekly limit ~6.2%");
+        assert_eq!(week_share(400), "<0.1%");
+        assert_eq!(week_share(123_000), "~12%");
         assert!(cache_note(usage).is_some(), "5.0M of 5.1M came from cache");
         let written = ChatTokenUsage {
             output: 10,

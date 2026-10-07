@@ -952,6 +952,15 @@ pub struct ChatTokenUsage {
     /// Prompt tokens written into the provider's cache.
     #[serde(default)]
     pub cache_write: u64,
+    /// Millionths of the account's weekly limit this chat is estimated to
+    /// have used: an apportioned share of the account's own percent, not a
+    /// count, so transcript recounts leave it alone.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub week_ppm: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl ChatTokenUsage {
@@ -964,6 +973,18 @@ impl ChatTokenUsage {
         self.output += other.output;
         self.cache_read += other.cache_read;
         self.cache_write += other.cache_write;
+        self.week_ppm += other.week_ppm;
+    }
+
+    /// Roughly what these tokens weigh against a plan's limit, in input-token
+    /// units at Anthropic's API price ratios: output 5×, cache writes 1.25×,
+    /// cache reads 0.1×. Providers don't publish how limits count; their
+    /// prices are the closest public proxy.
+    pub fn weighted(self) -> f64 {
+        self.input as f64
+            + 5.0 * self.output as f64
+            + 1.25 * self.cache_write as f64
+            + 0.1 * self.cache_read as f64
     }
 }
 
