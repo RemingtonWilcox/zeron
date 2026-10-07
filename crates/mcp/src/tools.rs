@@ -19,6 +19,7 @@ use zeron_proto::{
     Space, UserInputAnswer,
 };
 
+use crate::connectors::Connectors;
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
@@ -43,6 +44,7 @@ pub struct Tools {
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
+    connectors: Connectors,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -197,6 +199,33 @@ fn catalog() -> Vec<ToolDef> {
                 "archived": { "type": "boolean", "default": true }
             })),
         },
+        ToolDef {
+            name: "connectors",
+            description: "Lists optional tool connectors the user has installed (apps like Blender, other services) with their tools and whether they are enabled in this chat. Enable one with connector_enable when the task needs it.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "connector_enable",
+            description: "Start a connector from `connectors` for this chat. Its tools then appear on this server as <connector>__<tool>; the result lists them with their input schemas. Enabling a running connector just returns its tools.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "Connector name from `connectors` (case-insensitive)." } },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "connector_call",
+            description: "Call a tool of an enabled connector. Only needed when its <connector>__<tool> tools are missing from your tool list.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "connector": { "type": "string" },
+                    "tool": { "type": "string", "description": "The connector's own tool name, without the <connector>__ prefix." },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["connector", "tool"]
+            }),
+        },
     ];
     for (name, single, description) in [
         (
@@ -348,6 +377,19 @@ struct AnswerArg {
     labels: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct ConnectorArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ConnectorCallArgs {
+    connector: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Map<String, Value>,
+}
+
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))
 }
@@ -432,15 +474,53 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
+            connectors: Connectors::from_env(),
         }
     }
 
-    pub fn list(&self) -> Vec<ToolDef> {
-        catalog()
+    #[cfg(test)]
+    pub(crate) fn with_connectors(self, connectors: Connectors) -> Self {
+        Self { connectors, ..self }
+    }
+
+    /// The catalog, then the tools of every enabled connector.
+    pub fn list(&self) -> Vec<Value> {
+        let catalog = catalog().into_iter().map(|tool| json!(tool));
+        catalog.chain(self.connectors.tools()).collect()
     }
 
     pub fn has(&self, name: &str) -> bool {
-        catalog().iter().any(|t| t.name == name)
+        catalog().iter().any(|t| t.name == name) || self.proxies(name)
+    }
+
+    /// Changes whenever [`Self::list`] does.
+    pub(crate) fn revision(&self) -> u64 {
+        self.connectors.revision()
+    }
+
+    /// A server-instructions line about the user's connectors, if any.
+    pub(crate) fn connector_instructions(&self) -> Option<String> {
+        self.connectors.instructions()
+    }
+
+    /// Whether `name` is answered by a connector, through [`Self::proxy`].
+    pub(crate) fn proxies(&self, name: &str) -> bool {
+        name == "connector_call" || self.connectors.owner(name).is_some()
+    }
+
+    /// Forwards a call to a connector; `Ok` is its `tools/call` result as sent.
+    pub(crate) async fn proxy(&self, name: &str, args: Value) -> Result<Value, String> {
+        let (connector, tool, args) = if name == "connector_call" {
+            let call: ConnectorCallArgs = parse(args)?;
+            (call.connector, call.tool, Value::Object(call.arguments))
+        } else {
+            let (connector, tool) = self
+                .connectors
+                .owner(name)
+                .ok_or_else(|| format!("unknown tool: {name}"))?;
+            (connector, tool, args)
+        };
+        self.connectors.call(&connector, &tool, args).await
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -463,6 +543,12 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "connectors" => Ok(self.connectors.list()),
+            "connector_call" => return self.proxy(name, args).await,
+            "connector_enable" => {
+                let args: ConnectorArgs = parse(args)?;
+                self.connectors.enable(&args.name).await
+            }
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))

@@ -44,6 +44,7 @@
 //!   the interrupt control request, then SIGTERM and SIGKILL.
 
 pub mod catalog;
+pub mod desktop_extensions;
 mod discovery;
 mod normalize;
 mod refresh_gate;

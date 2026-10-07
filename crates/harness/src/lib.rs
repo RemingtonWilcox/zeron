@@ -287,6 +287,7 @@ pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod jsonrpc;
+pub mod mcp_client;
 pub mod mock;
 mod model_context;
 pub mod opencode;
