@@ -173,3 +173,14 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Whole-window scaling patch; also applies to gpui-base's GPUI dependency so
+# the application and component layer share one GPUI type universe. The rev is
+# GitHub's merge of zeronsh/zui#14 into the zui rev above; the `git@` user only
+# makes Cargo treat the URL as a different source, so it accepts the patch.
+# Remove after the patch is merged and the upstream revision is updated.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
+gpui_platform = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
+gpui_tokio = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }
+gpui_macros = { git = "https://git@github.com/zeronsh/zui", rev = "a296501b261ddbbe268ebbdfcd0fa875ace11ed2" }

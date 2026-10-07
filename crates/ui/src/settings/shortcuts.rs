@@ -640,6 +640,9 @@ fn refusal(
             .into(),
         );
     }
+    if crate::ui_scale::is_reserved_combo(combo) {
+        return Some(format!("{} is reserved for UI scaling.", display_combo(combo)).into());
+    }
     if send_combo_is_reserved(behavior, combo) {
         return Some(format!("{} is reserved for the composer.", display_combo(combo)).into());
     }
