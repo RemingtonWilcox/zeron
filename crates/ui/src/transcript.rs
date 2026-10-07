@@ -7476,6 +7476,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
+        let link = self.link_ui(cx);
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
         // Compact mode is the exception: EVERYTHING sits under the one work
@@ -7931,6 +7932,7 @@ impl Transcript {
                             content_reveal,
                             connector_reveal,
                             continuation_reveal,
+                            link.as_ref(),
                             theme,
                             cx.entity_id(),
                             cx,
@@ -7988,7 +7990,7 @@ impl Transcript {
                                 entry.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
+                            .child(chip_header(tool, open, link.as_ref(), theme, cx.entity_id(), cx)),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -8904,6 +8906,7 @@ enum ChipTrail {
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
+    link: Option<&render::LinkUi>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -9056,15 +9059,38 @@ fn chip_header_row(
                                 .child(SharedString::from(file_badge_name(path).to_owned())),
                         )
                         .map(|badge| {
-                            if hover_text {
-                                badge
+                            // A path the surface can resolve opens like a
+                            // transcript file link; the rest of the header
+                            // still toggles the row.
+                            let open = link.filter(|ui| ui.file_link(path).is_some()).cloned();
+                            match open {
+                                Some(ui) => {
+                                    let path = path.to_owned();
+                                    badge
+                                        .id("tool-file-badge")
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(theme.ink(0.10)).text_color(theme.text)
+                                        })
+                                        .on_click(move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            render::activate_link(
+                                                render::LinkTarget::new(&path, &path),
+                                                render::LinkAction::Primary,
+                                                Some(&ui),
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                        .into_any_element()
+                                }
+                                None if hover_text => badge
                                     .id("tool-file-badge")
                                     .group_hover("tool-header", |style| {
                                         style.text_color(theme.text)
                                     })
-                                    .into_any_element()
-                            } else {
-                                badge.into_any_element()
+                                    .into_any_element(),
+                                None => badge.into_any_element(),
                             }
                         });
                     crate::frost::frosted(5.0, 16.0, badge).into_any_element()
@@ -9169,11 +9195,12 @@ fn chip_header_row(
 fn chip_header(
     tool: &ToolItem,
     open: bool,
+    link: Option<&render::LinkUi>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    chip_header_row(tool, Some(ChipTrail::Chevron { open }), theme, view, cx)
+    chip_header_row(tool, Some(ChipTrail::Chevron { open }), link, theme, view, cx)
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -9365,6 +9392,7 @@ fn tool_chip(
     content_reveal: f32,
     connector_reveal: f32,
     continuation_reveal: f32,
+    link: Option<&render::LinkUi>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -9412,7 +9440,7 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, theme, view, cx)),
+                .child(chip_header_row(tool, None, link, theme, view, cx)),
         )
         .into_any_element()
 }
@@ -9468,6 +9496,7 @@ fn subagent_chip(
                 .child(chip_header_row(
                     tool,
                     Some(ChipTrail::OpenArrow),
+                    None,
                     theme,
                     view,
                     cx,
