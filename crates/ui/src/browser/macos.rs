@@ -392,10 +392,7 @@ impl NativePage {
             let Ok(keystroke) = gpui::Keystroke::parse(&combo) else {
                 return event.as_ptr();
             };
-            let browser_key = matches!(
-                combo.as_str(),
-                "cmd-l" | "cmd-t" | "cmd-w" | "cmd-[" | "cmd-]" | "cmd-shift-r" | "cmd-k" | "cmd-,"
-            );
+            let browser_key = super::model::browser_shortcut(&combo);
             let app_key = monitor_shortcuts
                 .borrow()
                 .iter()
@@ -515,7 +512,7 @@ impl NativePage {
         });
         unsafe {
             host.view.evaluateJavaScript_completionHandler(
-                &NSString::from_str("(() => { const link = document.querySelector('link[rel~=icon]'); return link ? link.href : new URL('/favicon.ico', location.href).href; })()"),
+                &NSString::from_str(super::model::FAVICON_SCRIPT),
                 Some(&completion),
             );
         }

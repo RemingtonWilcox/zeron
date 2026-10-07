@@ -284,7 +284,7 @@ impl BrowserSurface {
         if self.page.url.is_none() && self.previews_task.is_some() {
             return self.preview_body(theme, cx);
         }
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_error = self.page.error.is_some();
         let title = if has_error {
             "Couldn’t load this page"
@@ -403,7 +403,7 @@ impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let focused = self.address.focus_handle(cx).is_focused(window);
-        let external = !cfg!(any(target_os = "macos", target_os = "linux"));
+        let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_page = self.page.url.is_some();
         let back = button(
             "browser-back",
@@ -517,7 +517,7 @@ impl Render for BrowserSurface {
             // Empty tabs share the shell's glass, like the sidebar tab picker.
             // Keep an opaque backing while native web content is loading.
             .when(has_page, |body| body.bg(theme.bg));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let body = if let Some(native) = &self.native {
             if self.page.error.is_some() {
                 body.child(self.empty_body(&theme, cx))
@@ -616,7 +616,7 @@ impl Render for BrowserSurface {
         } else {
             body.child(self.empty_body(&theme, cx))
         };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let body = body.child(self.empty_body(&theme, cx));
 
         #[cfg(target_os = "linux")]
