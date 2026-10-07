@@ -50,6 +50,7 @@ struct CachedTranscript {
     chat_id: String,
     entries: Vec<SessionMessageEntry>,
     context_usage: Option<zeron_proto::ContextUsage>,
+    token_usage: Option<zeron_proto::ChatTokenUsage>,
     bytes: usize,
 }
 
@@ -741,6 +742,9 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// The selected chat's token totals, from its host (see
+    /// [`zeron_proto::ChatTokenUsage`]).
+    pub token_usage: Option<zeron_proto::ChatTokenUsage>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -846,6 +850,7 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            token_usage: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1072,6 +1077,8 @@ impl AppState {
             self.restore_canvas_target();
             self.transcript.clear();
             self.context_usage = None;
+            self.token_usage = None;
+        self.token_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
@@ -1487,6 +1494,10 @@ impl AppState {
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
+            cx.notify();
+        }
+        if update.token_usage.is_some() && self.token_usage != update.token_usage {
+            self.token_usage = update.token_usage;
             cx.notify();
         }
         Ok(())
@@ -2173,6 +2184,7 @@ impl AppState {
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
         self.context_usage = None;
+        self.token_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.echoes.clear();
@@ -2561,6 +2573,7 @@ impl AppState {
                     chat_id: previous.clone(),
                     entries,
                     context_usage: self.context_usage,
+                    token_usage: self.token_usage,
                     bytes,
                 });
                 while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
@@ -2584,6 +2597,7 @@ impl AppState {
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
+        self.token_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -2602,6 +2616,7 @@ impl AppState {
             }
             self.transcript = cached.entries;
             self.context_usage = cached.context_usage;
+            self.token_usage = cached.token_usage;
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
@@ -3863,6 +3878,7 @@ mod tests {
             let update = |id: &str| zeron_doc::TranscriptUpdate {
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
+                token_usage: None,
                 replay_baseline: None,
             };
             state.select_chat(Some("whale".into()), cx);
