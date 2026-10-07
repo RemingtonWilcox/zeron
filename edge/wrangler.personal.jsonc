@@ -1,0 +1,58 @@
+{
+  // Personal relay: this edge Worker deployed to your own Cloudflare account,
+  // reachable only at its workers.dev URL. Deploy with
+  //   npx wrangler deploy -c wrangler.personal.jsonc
+  // after `npx wrangler login`; the account comes from that login.
+  // Shares no names with wrangler.jsonc, so it can never deploy over (or bind
+  // to the storage of) the production edge.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Durable Object storage is bound to this name: renaming it later orphans
+  // every room (devices re-upload, but treat the name as permanent).
+  "name": "zeron-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": {
+    "loro-crdt": "loro-crdt/base64"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+    ]
+  },
+  // A fresh worker creates every class at once. Classes added to
+  // wrangler.jsonc later need a new tag here too (v2, v3, ...); never edit v1.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionRoom", "DeviceRoom", "PreviewRoom", "RegistryRoom", "ChatRoom"]
+    }
+  ],
+  // Create both once: `npx wrangler r2 bucket create zeron-relay-blobs` (and
+  // zeron-relay-releases). RELEASES stays empty; it is a separate bucket so
+  // the unauthenticated /releases/* route can never read BLOBS keys.
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "zeron-relay-blobs" },
+    { "binding": "RELEASES", "bucket_name": "zeron-relay-releases" }
+  ],
+  "vars": {
+    // Your WorkOS AuthKit client id (public; it appears in every authorize
+    // URL). Secrets are set with `npx wrangler secret put <NAME> -c
+    // wrangler.personal.jsonc`: WORKOS_API_KEY now, APNS_KEY_P8 and
+    // APNS_KEY_ID when push is set up.
+    "WORKOS_CLIENT_ID": "REPLACE_WITH_YOUR_WORKOS_CLIENT_ID",
+    "AUTH_MODE": "workos",
+    // Push goes to the personal iOS app's bundle id under your Apple team.
+    "APNS_TOPIC": "com.remingtonwilcox.zeron",
+    "APNS_TEAM_ID": "REPLACE_WITH_YOUR_APPLE_TEAM_ID"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -13,8 +13,15 @@ export interface Env {
    * /releases/* for the curl-install flow. */
   RELEASES: R2Bucket;
   WORKOS_CLIENT_ID: string;
-  /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
+  /** "workos" (verify AuthKit JWTs), "token" (one shared secret, below) or
+   * "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
+  /** Token mode (a self-hosted single-user relay): the bearer must equal
+   * RELAY_TOKEN (secret) and authenticates as RELAY_USER_ID in RELAY_ORG_ID.
+   * Any of the three unset ⇒ every request is refused. */
+  RELAY_TOKEN?: string;
+  RELAY_USER_ID?: string;
+  RELAY_ORG_ID?: string;
   /** Optional overrides for the WorkOS trust anchor. */
   WORKOS_ISSUER?: string;
   WORKOS_JWKS_URL?: string;

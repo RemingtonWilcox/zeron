@@ -7,6 +7,9 @@
  * Workspace rooms (`ws/{orgId}`) authorize on the token's WorkOS organization
  * claim (`org_id`, present when the session was refreshed scoped to an org):
  * membership = claim equals the room's orgId.
+ *
+ * `AUTH_MODE: "token"` replaces WorkOS for a self-hosted single-user relay:
+ * the bearer is a shared secret mapped to one configured user and org.
  */
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env";
@@ -36,7 +39,27 @@ export const bearerFromRequest = (request: Request): string | undefined => {
   return url.searchParams.get("token") ?? undefined;
 };
 
+const sha256 = async (value: string): Promise<Uint8Array> =>
+  new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+
+/** Constant-time equality: comparing fixed-length digests leaks neither the
+ * secret's length nor the position of the first mismatch. */
+export const tokenMatches = async (presented: string, secret: string): Promise<boolean> => {
+  const [a, b] = await Promise.all([sha256(presented), sha256(secret)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+};
+
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
+  if (env.AUTH_MODE === "token") {
+    // Self-hosted single-user relay: one shared secret stands for one fixed
+    // user and org, so every device lands in the same rooms.
+    const { RELAY_TOKEN, RELAY_USER_ID, RELAY_ORG_ID } = env;
+    if (!RELAY_TOKEN || !RELAY_USER_ID || !RELAY_ORG_ID) return undefined;
+    if (!(await tokenMatches(token, RELAY_TOKEN))) return undefined;
+    return { userId: RELAY_USER_ID, orgId: RELAY_ORG_ID };
+  }
   if (env.AUTH_MODE === "dev") {
     // Dev mode mirrors the old apps/server: the bearer string IS the user id.
     // `userId@orgId` additionally carries a fake org claim so workspace-room

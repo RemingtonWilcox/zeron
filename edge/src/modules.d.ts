@@ -4,3 +4,9 @@ declare module "*.sh" {
   const text: string;
   export default text;
 }
+
+// Vite `?raw` imports (unit tests reading the wrangler configs).
+declare module "*?raw" {
+  const text: string;
+  export default text;
+}

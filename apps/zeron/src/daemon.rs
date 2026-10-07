@@ -26,6 +26,7 @@ const CAPTURED_ENV: &[&str] = &[
     "ZERON_EDGE_URL",
     "ZERON_EDGE_TOKEN",
     "ZERON_ORG_ID",
+    "ZERON_USER_ID",
     "ZERON_WORKOS_CLIENT_ID",
     "ZERON_WORKOS_API_BASE",
     "ZERON_IPC_PORT",

@@ -116,7 +116,8 @@ export default {
     const parts = url.pathname.split("/").filter(Boolean);
 
     if (url.pathname === "/health") {
-      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
+      const auth = env.AUTH_MODE === "dev" || env.AUTH_MODE === "token" ? env.AUTH_MODE : "workos";
+      return json({ ok: true, auth });
     }
 
     // ── public install surface (also routed from zeron.sh): the
