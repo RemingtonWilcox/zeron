@@ -241,6 +241,20 @@ impl ClaudeHarness {
             cmd.arg("--settings");
             cmd.arg(Value::Object(settings).to_string());
         }
+        // A general chat answers from the web: search and fetch need no
+        // approval, and nothing touches files or runs commands. Flags, not the
+        // folder's settings file: Claude ignores a file's allow rules until a
+        // person trusts the folder interactively.
+        if crate::adapter_install::data_dir()
+            .is_some_and(|dir| zeron_proto::is_general_chat_dir(&request.cwd, &dir))
+        {
+            cmd.args([
+                "--allowedTools",
+                "WebSearch,WebFetch",
+                "--disallowedTools",
+                "Bash,PowerShell,Edit,MultiEdit,Write,NotebookEdit",
+            ]);
+        }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }

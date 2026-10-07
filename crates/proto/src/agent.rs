@@ -896,6 +896,32 @@ mod tests {
     }
 }
 
+/// The folder under the data dir that general chats (the desktop's floating
+/// Chat panel) run in. A harness launched there is a web-capable assistant,
+/// not a coding agent.
+pub const GENERAL_CHAT_DIR: &str = "general-chat";
+
+/// Whether `cwd` is the general chats' folder under `data_dir`. A project
+/// folder that happens to share the name is not.
+pub fn is_general_chat_dir(cwd: &str, data_dir: &std::path::Path) -> bool {
+    std::path::Path::new(cwd) == data_dir.join(GENERAL_CHAT_DIR)
+}
+
+#[cfg(test)]
+mod general_chat_tests {
+    use std::path::Path;
+
+    #[test]
+    fn only_the_data_dirs_general_chat_folder_matches() {
+        let matches = |cwd| super::is_general_chat_dir(cwd, Path::new("/home/me/.zeron"));
+        assert!(matches("/home/me/.zeron/general-chat"));
+        assert!(matches("/home/me/.zeron/general-chat/"));
+        assert!(!matches("/home/me/code/general-chat"));
+        assert!(!matches("/home/me/.zeron/general-chat/sub"));
+        assert!(!matches(""));
+    }
+}
+
 /// Host-owned context snapshot, replicated with the chat document.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

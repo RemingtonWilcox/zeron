@@ -62,11 +62,12 @@ impl Shell {
     }
 
     /// Fork `source` through its latest completed response into a new chat
-    /// hanging under `parent_id`, and open it in the right pane. A side
-    /// chat's own fork button passes its parent so the copy lists as a
-    /// sibling; the picker passes the source itself. `config` moves the
-    /// copy onto another agent before it opens; its first run then gets the
-    /// copied conversation as context, like any fork.
+    /// hanging under `parent_id`, and open it in the right pane (a general
+    /// chat's in the Chat panel). A side chat's own fork button passes its
+    /// parent so the copy lists as a sibling; the picker passes the source
+    /// itself. `config` moves the copy onto another agent before it opens;
+    /// its first run then gets the copied conversation as context, like any
+    /// fork.
     pub(super) fn fork_chat(
         &mut self,
         source: zeron_proto::Chat,
@@ -108,12 +109,14 @@ impl Shell {
                 this.side_chat_creating = false;
                 match result {
                     Ok(chat) => {
-                        if this
-                            .state
-                            .read(cx)
-                            .chats
-                            .iter()
-                            .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
+                        let state = this.state.read(cx);
+                        // A general chat's continuation stays in the Chat panel.
+                        let general = is_general_chat(&chat, state.data_dir.as_deref());
+                        if general
+                            || state
+                                .chats
+                                .iter()
+                                .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
                         {
                             // The synced row may still carry the source's
                             // config; the side chat's state copies this one.
@@ -122,7 +125,11 @@ impl Shell {
                                     state.apply_chat_config(&chat.id, config)
                                 });
                             }
-                            this.open_side_chat(chat, key, cx);
+                            if general {
+                                this.show_in_chat_panel(chat, false, cx);
+                            } else {
+                                this.open_side_chat(chat, key, cx);
+                            }
                         }
                     }
                     Err(error) => this.show_side_chat_error(error.to_string(), cx),
