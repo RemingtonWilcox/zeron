@@ -98,6 +98,8 @@ final class AppModel {
         #endif
         if args.contains("-demo") || args.contains("-route") && Credentials.stored() == nil {
             start(.demo(options: Self.demoOptions()))
+        } else if let token = Endpoints.relayToken {
+            start(.token(userId: Endpoints.relayUserId, orgId: Endpoints.relayOrgId, token: token))
         } else if let stored = Credentials.stored() {
             start(stored)
         }
@@ -125,7 +127,7 @@ final class AppModel {
     private static func claimCoreDir(for credentials: Credentials) {
         let owner: String
         switch credentials {
-        case let .workOs(userId, orgId, _), let .dev(userId, orgId): owner = "\(userId)/\(orgId)"
+        case let .workOs(userId, orgId, _), let .dev(userId, orgId), let .token(userId, orgId, _): owner = "\(userId)/\(orgId)"
         case .demo: return
         }
         let marker = coreDir.appendingPathComponent(".owner")
@@ -169,7 +171,7 @@ final class AppModel {
         }
     }
 
-    /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
+    /// `-edge <url>` points at a local `wrangler dev` edge; otherwise the relay.
     static var edgeURL: String {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
@@ -651,7 +653,7 @@ extension Credentials {
             dict = ["kind": "workos", "userId": userId, "orgId": orgId, "access": tokens.accessToken, "refresh": tokens.refreshToken]
         case let .dev(userId, orgId):
             dict = ["kind": "dev", "userId": userId, "orgId": orgId]
-        case .demo:
+        case .token, .demo:
             return
         }
         if let data = try? JSONSerialization.data(withJSONObject: dict) {

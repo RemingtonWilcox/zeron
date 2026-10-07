@@ -2,7 +2,16 @@ import AuthenticationServices
 import UIKit
 
 enum Endpoints {
-    static let edgeURL = URL(string: "https://edge.zeron.sh")!
+    static let edgeURL = URL(string: "http://100.86.66.58:8787")!
+    /// The self-hosted relay's fixed identity (its RELAY_USER_ID/RELAY_ORG_ID).
+    static let relayUserId = "user_01M3Q37SMS35SJMAX38ZG0DJNV"
+    static let relayOrgId = "org_01M3QM6N5YRETRWP51XKAJ4ZQQ"
+    /// The relay's shared token, copied into the bundle from the building
+    /// Mac's `~/.zeron-relay-token` by the "Relay token" build phase.
+    static let relayToken: String? = Bundle.main.url(forResource: "relay-token", withExtension: nil)
+        .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .flatMap { $0.isEmpty ? nil : $0 }
     static let workosClientId = "client_01KWD0EAKZKD50YCQJNYSRE4BY"
     static let callbackScheme = "zeron"
 

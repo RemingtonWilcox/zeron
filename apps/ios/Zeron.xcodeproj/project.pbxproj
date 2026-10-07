@@ -115,6 +115,7 @@
 				A1000000000000000000S001 /* Sources */,
 				A1000000000000000000F001 /* Frameworks */,
 				A1000000000000000000R001 /* Resources */,
+				A1000000000000000000SH02 /* Relay token */,
 			);
 			buildRules = (
 			);
@@ -237,6 +238,26 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "exec \"$SRCROOT/../../scripts/ios/build-core.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		A1000000000000000000SH02 /* Relay token */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Relay token";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "dst=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/relay-token\"\nif [ -f ~/.zeron-relay-token ]; then cat ~/.zeron-relay-token > \"$dst\"; else rm -f \"$dst\"; fi\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
