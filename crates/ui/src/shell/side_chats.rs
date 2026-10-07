@@ -39,17 +39,39 @@ impl Shell {
             return;
         };
         let parent = source.id.clone();
-        self.fork_chat(source, parent, cx);
+        self.fork_chat(source, parent, None, cx);
+    }
+
+    /// The model picker chose another agent for the chat `state` shows:
+    /// fork it into a side chat running `config`. A side chat's copy lists
+    /// beside it, under the same parent.
+    pub(super) fn continue_in_side_chat(
+        &mut self,
+        state: &Entity<AppState>,
+        config: zeron_proto::ChatConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = state.read(cx).selected_chat_row().cloned() else {
+            return;
+        };
+        let parent = source
+            .parent_chat_id
+            .clone()
+            .unwrap_or_else(|| source.id.clone());
+        self.fork_chat(source, parent, Some(config), cx);
     }
 
     /// Fork `source` through its latest completed response into a new chat
     /// hanging under `parent_id`, and open it in the right pane. A side
     /// chat's own fork button passes its parent so the copy lists as a
-    /// sibling; the picker passes the source itself.
+    /// sibling; the picker passes the source itself. `config` moves the
+    /// copy onto another agent before it opens; its first run then gets the
+    /// copied conversation as context, like any fork.
     pub(super) fn fork_chat(
         &mut self,
         source: zeron_proto::Chat,
         parent_id: String,
+        config: Option<zeron_proto::ChatConfig>,
         cx: &mut Context<Self>,
     ) {
         if self.side_chat_creating {
@@ -67,10 +89,21 @@ impl Shell {
             "targetDeviceId": source.device_id,
         });
         cx.spawn(async move |this, cx| {
-            let result = engine
+            let mut result = engine
                 .client()
                 .call_as::<zeron_proto::Chat>(methods::FORK_SIDE_CHAT, params)
                 .await;
+            if let (Ok(chat), Some(config)) = (&mut result, config) {
+                let params = serde_json::json!({
+                    "op": "setChatConfig",
+                    "chatId": chat.id,
+                    "config": config,
+                });
+                if let Err(err) = engine.client().call(methods::MUTATE, params).await {
+                    tracing::warn!(error = %err, "side chat setChatConfig failed");
+                }
+                chat.config = Some(config);
+            }
             let _ = this.update(cx, |this, cx| {
                 this.side_chat_creating = false;
                 match result {
@@ -82,6 +115,13 @@ impl Shell {
                             .iter()
                             .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
                         {
+                            // The synced row may still carry the source's
+                            // config; the side chat's state copies this one.
+                            if let Some(config) = chat.config.clone() {
+                                this.state.update(cx, |state, _| {
+                                    state.apply_chat_config(&chat.id, config)
+                                });
+                            }
                             this.open_side_chat(chat, key, cx);
                         }
                     }
@@ -214,11 +254,15 @@ impl Shell {
             cx.subscribe(&transcript, Self::on_transcript_event),
             cx.subscribe(&composer, {
                 let transcript = transcript.clone();
+                let state = state.clone();
                 move |this: &mut Self, _, event, cx| {
                     match event {
                         ComposerEvent::WorkspaceCommand(command) => {
                             this.pending_workspace_command = Some(*command);
                             cx.notify();
+                        }
+                        ComposerEvent::ContinueInSideChat(config) => {
+                            this.continue_in_side_chat(&state, config.clone(), cx);
                         }
                         // A side chat is already selected before its composer
                         // mounts, and it inherits its parent's checkout, so it

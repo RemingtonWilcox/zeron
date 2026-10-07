@@ -1387,7 +1387,7 @@ impl Inner {
                 })?
             }
         };
-        let history: Vec<_> = entries[..end]
+        let turns: Vec<_> = entries[..end]
             .iter()
             .map(|entry| {
                 let text = entry
@@ -1398,7 +1398,7 @@ impl Inner {
                         zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
                             "Tool: {}\n{}",
                             serde_json::to_string(call).unwrap_or_default(),
-                            output.clone().unwrap_or_default()
+                            clip_tool_output(output.as_deref().unwrap_or_default())
                         )),
                         _ => None,
                     })
@@ -1407,16 +1407,60 @@ impl Inner {
                 (entry.role, text)
             })
             .filter(|(_, text)| !text.is_empty())
+            .collect();
+        let kept = newest_within(&turns, FORK_HISTORY_CHARS);
+        let omitted = turns.len() - kept.len();
+        let history: Vec<_> = kept
+            .iter()
             .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
             .collect();
+        let omitted = if omitted > 0 {
+            format!(" The {omitted} earliest messages were left out to fit.")
+        } else {
+            String::new()
+        };
         (!history.is_empty()).then(|| {
             format!(
-                "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
+                "Continue this side conversation using the following prior conversation as context.{omitted}\n<conversation>\n{}\n</conversation>\n\n{}",
                 serde_json::to_string(&history).unwrap_or_default(),
                 prompt
             )
         })
     }
+}
+
+/// A fork's history keeps each tool output's head and tail only: the new
+/// session needs what a tool did, not the whole log, and a long chat's raw
+/// output can overflow a smaller model's context (a local 32K model).
+const FORK_TOOL_OUTPUT_CHARS: usize = 2_000;
+
+/// The whole history's budget, newest messages first: about 20K tokens, so
+/// even a 32K-context model has room left to work.
+const FORK_HISTORY_CHARS: usize = 80_000;
+
+/// The newest `turns` whose text fits `budget` characters, oldest first.
+/// The latest one is always kept, however long.
+fn newest_within<T>(turns: &[(T, String)], budget: usize) -> &[(T, String)] {
+    let mut used = 0;
+    let start = turns
+        .iter()
+        .rposition(|(_, text)| {
+            used += text.chars().count();
+            used > budget
+        })
+        .map_or(0, |over| (over + 1).min(turns.len() - 1));
+    &turns[start..]
+}
+
+fn clip_tool_output(output: &str) -> std::borrow::Cow<'_, str> {
+    let chars = output.chars().count();
+    if chars <= FORK_TOOL_OUTPUT_CHARS {
+        return output.into();
+    }
+    let keep = FORK_TOOL_OUTPUT_CHARS / 2;
+    let head: String = output.chars().take(keep).collect();
+    let tail: String = output.chars().skip(chars - keep).collect();
+    format!("{head}\n… [{} characters omitted] …\n{tail}", chars - 2 * keep).into()
 }
 
 /// Whether the provider routes this prompt as a native command: its delivered
@@ -2929,6 +2973,32 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_history_clips_long_tool_output_to_its_ends() {
+        assert_eq!(clip_tool_output("short"), "short");
+        let long = format!("{}{}{}", "a".repeat(1_500), "é".repeat(500), "z".repeat(1_500));
+        let clipped = clip_tool_output(&long);
+        assert!(clipped.starts_with(&"a".repeat(1_000)));
+        assert!(clipped.ends_with(&"z".repeat(1_000)));
+        assert!(clipped.contains("[1500 characters omitted]"));
+    }
+
+    #[test]
+    fn fork_history_keeps_the_newest_messages_within_budget() {
+        let turns: Vec<_> = ["old", "middle", "newest"]
+            .into_iter()
+            .map(|text| ((), text.repeat(10)))
+            .collect();
+        assert_eq!(newest_within(&turns, 1_000).len(), 3);
+        let kept = newest_within(&turns, 120);
+        assert_eq!(kept.len(), 2);
+        assert!(kept[0].1.starts_with("middle"));
+        let kept = newest_within(&turns, 10);
+        assert_eq!(kept.len(), 1, "the latest message is kept even when it alone is over");
+        assert!(kept[0].1.starts_with("newest"));
+        assert!(newest_within::<()>(&[], 10).is_empty());
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
