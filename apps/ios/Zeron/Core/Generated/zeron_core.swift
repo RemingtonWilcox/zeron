@@ -9385,6 +9385,11 @@ public enum Credentials: Equatable, Hashable {
     case dev(userId: String, orgId: String
     )
     /**
+     * `AUTH_MODE=token` edge: the bearer is the shared relay token.
+     */
+    case token(userId: String, orgId: String, token: String
+    )
+    /**
      * Fully offline dataset with a simulated host.
      */
     case demo(options: DemoOptions
@@ -9416,7 +9421,10 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
         case 2: return .dev(userId: try FfiConverterString.read(from: &buf), orgId: try FfiConverterString.read(from: &buf)
         )
         
-        case 3: return .demo(options: try FfiConverterTypeDemoOptions.read(from: &buf)
+        case 3: return .token(userId: try FfiConverterString.read(from: &buf), orgId: try FfiConverterString.read(from: &buf), token: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .demo(options: try FfiConverterTypeDemoOptions.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -9440,8 +9448,15 @@ public struct FfiConverterTypeCredentials: FfiConverterRustBuffer {
             FfiConverterString.write(orgId, into: &buf)
             
         
-        case let .demo(options):
+        case let .token(userId,orgId,token):
             writeInt(&buf, Int32(3))
+            FfiConverterString.write(userId, into: &buf)
+            FfiConverterString.write(orgId, into: &buf)
+            FfiConverterString.write(token, into: &buf)
+            
+        
+        case let .demo(options):
+            writeInt(&buf, Int32(4))
             FfiConverterTypeDemoOptions.write(options, into: &buf)
             
         }

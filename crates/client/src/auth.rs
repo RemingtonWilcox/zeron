@@ -332,6 +332,9 @@ impl TokenProvider {
                     format!("{user_id}@{org_id}")
                 },
             },
+            Credentials::Token { token, .. } => Mode::Dev {
+                bearer: token.clone(),
+            },
             Credentials::WorkOs { org_id, tokens, .. } => Mode::WorkOs {
                 edge_url: edge_url.to_owned(),
                 org_id: org_id.clone(),
@@ -584,6 +587,20 @@ mod tests {
         };
         let tokens = TokenProvider::new(&credentials, "http://unused", events);
         assert_eq!(tokens.bearer().await.unwrap(), "wing@acme");
+    }
+
+    #[tokio::test]
+    async fn token_bearer_is_the_token_and_identity_is_fixed() {
+        let events = EventPump::new(Arc::new(crate::events::NullListener));
+        let credentials = crate::config::Credentials::Token {
+            user_id: "wing".into(),
+            org_id: "acme".into(),
+            token: "s3cret".into(),
+        };
+        let tokens = TokenProvider::new(&credentials, "http://unused", events);
+        assert_eq!(tokens.bearer().await.unwrap(), "s3cret");
+        assert_eq!(credentials.user_id(), "wing");
+        assert_eq!(credentials.org_id(), "acme");
     }
 
     #[test]
