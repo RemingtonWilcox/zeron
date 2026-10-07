@@ -495,6 +495,27 @@ impl WorkspaceFiles {
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
     }
 
+    /// The workspace-relative path of a file a chat's agent asks to show.
+    /// `path` is relative to the chat's folder or absolute; once symlinks
+    /// resolve it must be a regular file inside the chat's workspace.
+    pub async fn artifact_path(
+        &self,
+        chat_id: &str,
+        path: &str,
+    ) -> Result<String, WorkspaceFilesError> {
+        let workspace = self
+            .resolve_target(&WorkspaceTarget {
+                chat_id: Some(chat_id.to_owned()),
+                space_id: None,
+                checkout_path: None,
+            })
+            .await?;
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || artifact_path_blocking(&workspace.root, &path))
+            .await
+            .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
+    }
+
     pub async fn write_file(
         &self,
         request: WriteWorkspaceFileRequest,
@@ -1441,6 +1462,23 @@ fn resolve_absolute_read(
     })?;
     WorkspaceRelativePath::from_resolved(relative)
         .map(|relative| AbsoluteRead::Outside { base, relative })
+}
+
+fn artifact_path_blocking(root: &Path, path: &str) -> Result<String, WorkspaceFilesError> {
+    let root = std::fs::canonicalize(root).unwrap_or(root.to_path_buf());
+    let canonical = std::fs::canonicalize(root.join(path)).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkspaceFilesError::NotFound(format!("{path} does not exist"))
+        } else {
+            WorkspaceFilesError::Io(error.to_string())
+        }
+    })?;
+    let relative = canonical.strip_prefix(&root).map_err(|_| {
+        WorkspaceFilesError::Authorization(format!("{path} is outside this chat's workspace"))
+    })?;
+    let relative = WorkspaceRelativePath::from_resolved(relative)?;
+    checked_file_metadata(&root, &relative)?;
+    Ok(relative.wire_path())
 }
 
 /// A chat-target read of an absolute path: inside the workspace it reads
@@ -2505,6 +2543,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn artifacts_are_regular_files_inside_the_chat_workspace() {
+        #[cfg(unix)]
+        use std::os::unix::fs::{symlink as symlink_dir, symlink as symlink_file};
+        #[cfg(windows)]
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("chat");
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("out/chart.svg"), "<svg/>").unwrap();
+        std::fs::write(root.join(".git/config"), "").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "secret").unwrap();
+        symlink_file(dir.path().join("secret.txt"), root.join("leak.txt")).unwrap();
+        symlink_dir(dir.path(), root.join("up")).unwrap();
+        symlink_file(root.join("out/chart.svg"), root.join("alias.svg")).unwrap();
+
+        let absolute = root.join("out/chart.svg").to_string_lossy().into_owned();
+        for path in ["out/chart.svg", "./out/../out/chart.svg", absolute.as_str()] {
+            assert_eq!(
+                artifact_path_blocking(&root, path).unwrap(),
+                "out/chart.svg",
+                "{path}"
+            );
+        }
+        // A link that stays inside shows its target.
+        assert_eq!(
+            artifact_path_blocking(&root, "alias.svg").unwrap(),
+            "out/chart.svg"
+        );
+        let outside = dir.path().join("secret.txt").to_string_lossy().into_owned();
+        for path in [
+            "../secret.txt",
+            outside.as_str(),
+            "leak.txt",
+            "up/secret.txt",
+        ] {
+            assert!(
+                matches!(
+                    artifact_path_blocking(&root, path),
+                    Err(WorkspaceFilesError::Authorization(message)) if message.contains("outside")
+                ),
+                "{path}"
+            );
+        }
+        for path in ["out", ".git/config", "missing.html"] {
+            assert!(artifact_path_blocking(&root, path).is_err(), "{path}");
+        }
     }
 
     // Absolute reads take POSIX paths — the only shape a UI sends.

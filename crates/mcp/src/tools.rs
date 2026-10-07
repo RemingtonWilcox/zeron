@@ -74,6 +74,17 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
+            name: "show",
+            description: "When you create a visual artifact (an HTML page, chart, diagram, mockup, SVG, image, Markdown document or PDF), call show to display it to the user beside this chat instead of only naming the file. Pass a file inside your workspace, or the http(s)://localhost address of a dev server you started. An open file refreshes as you change it; call show again to bring an updated artifact back to the front.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "A file path relative to your working directory (or absolute, inside it), or an http(s) URL on localhost, *.localhost or 127.0.0.1." }
+                },
+                "required": ["target"]
+            }),
+        },
+        ToolDef {
             name: "list_devices",
             description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
@@ -267,6 +278,11 @@ struct BatchArgs {
 #[derive(Deserialize)]
 struct ChatArgs {
     chat: String,
+}
+
+#[derive(Deserialize)]
+struct ShowArgs {
+    target: String,
 }
 
 #[derive(Deserialize)]
@@ -528,6 +544,7 @@ impl Tools {
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
         let result = match name {
             "whoami" => self.whoami().await,
+            "show" => self.show(parse(args)?).await,
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
@@ -610,6 +627,34 @@ impl Tools {
                 "Messages you send are attributed to this chat; it cannot message itself."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
+            },
+        }))
+    }
+
+    /// The engine validates the target against this chat's workspace and
+    /// hands it to the windows showing the chat.
+    async fn show(&self, args: ShowArgs) -> anyhow::Result<Value> {
+        let chat = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("show only works from inside a Zeron chat"))?;
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::SHOW_ARTIFACT,
+                json!({ "chatId": chat, "target": args.target }),
+            )
+            .await?;
+        let windows = reply["windows"].as_u64().unwrap_or(0);
+        Ok(json!({
+            "shown": reply["artifact"],
+            "windows": windows,
+            "note": if windows == 0 {
+                "No Zeron window is showing this chat right now, so nothing opened. Name the file in your reply instead."
+            } else {
+                "Shown beside the chat."
             },
         }))
     }
@@ -1426,6 +1471,22 @@ mod tests {
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::SHOW_ARTIFACT => {
+                    let target = params["target"].as_str().unwrap_or_default().to_owned();
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    if target.starts_with("..") {
+                        return Err(RpcError::Failed(format!(
+                            "{target} is outside this chat's workspace"
+                        )));
+                    }
+                    RpcReply::Value(json!({
+                        "artifact": { "kind": "file", "path": target },
+                        "windows": 1
+                    }))
+                }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -1447,6 +1508,45 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn show_asks_the_engine_on_behalf_of_the_origin_chat() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-alpha-1".into()),
+            device_id: None,
+        };
+        let unattached = tools(world.clone(), Origin::default());
+        let tools = tools(world.clone(), origin);
+        let shown = tools
+            .call("show", json!({ "target": "out/chart.svg" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            shown["shown"],
+            json!({ "kind": "file", "path": "out/chart.svg" })
+        );
+        assert_eq!(shown["windows"], 1);
+        assert_eq!(
+            world.writes.lock().unwrap().as_slice(),
+            [(
+                methods::SHOW_ARTIFACT.to_owned(),
+                json!({ "chatId": "chat-alpha-1", "target": "out/chart.svg" })
+            )]
+        );
+        // The engine's refusal reaches the agent as the tool's error.
+        let error = tools
+            .call("show", json!({ "target": "../secret.txt" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("outside this chat's workspace"), "{error}");
+        let error = unattached
+            .call("show", json!({ "target": "out/chart.svg" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("inside a Zeron chat"), "{error}");
+        assert_eq!(world.writes.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

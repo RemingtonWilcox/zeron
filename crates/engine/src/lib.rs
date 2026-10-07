@@ -16,6 +16,7 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
+pub mod artifacts;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
@@ -136,6 +137,7 @@ pub struct EngineCore {
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
     pub previews: zeron_preview::PreviewService,
+    pub artifacts: artifacts::Artifacts,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -334,6 +336,7 @@ impl EngineCore {
             terminals,
             project_actions,
             previews,
+            artifacts: Default::default(),
             change_requests,
             diff_sync,
             spaces_sync,
@@ -474,6 +477,7 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
+        .with_artifacts(self.artifacts.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

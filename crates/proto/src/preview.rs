@@ -58,3 +58,19 @@ impl Default for PreviewSnapshot {
 pub struct WatchPreviewsParams {
     pub chat_id: String,
 }
+
+/// What a chat's agent asked to show beside the chat (`ShowArtifact`), as the
+/// chat's host validated it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Artifact {
+    /// A regular file inside the chat's workspace, workspace-relative.
+    File { path: String },
+    /// A loopback page on the host. `preview` is the same page through the
+    /// preview proxy, which other devices can reach.
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
+}
