@@ -63,6 +63,13 @@ pub enum Credentials {
     },
     /// `AUTH_MODE=dev` edge: the bearer is `userId@orgId`.
     Dev { user_id: String, org_id: String },
+    /// `AUTH_MODE=token` edge: the bearer is the shared relay token, which
+    /// the edge authenticates as its configured user and org.
+    Token {
+        user_id: String,
+        org_id: String,
+        token: String,
+    },
     /// Fully offline, deterministic dataset with a simulated host.
     Demo(DemoOptions),
 }
@@ -74,14 +81,18 @@ impl Credentials {
 
     pub fn org_id(&self) -> &str {
         match self {
-            Credentials::WorkOs { org_id, .. } | Credentials::Dev { org_id, .. } => org_id,
+            Credentials::WorkOs { org_id, .. }
+            | Credentials::Dev { org_id, .. }
+            | Credentials::Token { org_id, .. } => org_id,
             Credentials::Demo(_) => "demo",
         }
     }
 
     pub fn user_id(&self) -> &str {
         match self {
-            Credentials::WorkOs { user_id, .. } | Credentials::Dev { user_id, .. } => user_id,
+            Credentials::WorkOs { user_id, .. }
+            | Credentials::Dev { user_id, .. }
+            | Credentials::Token { user_id, .. } => user_id,
             Credentials::Demo(_) => "demo",
         }
     }

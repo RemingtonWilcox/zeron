@@ -191,6 +191,12 @@ pub enum Credentials {
     },
     /// `AUTH_MODE=dev` edge: the bearer is `userId@orgId`.
     Dev { user_id: String, org_id: String },
+    /// `AUTH_MODE=token` edge: the bearer is the shared relay token.
+    Token {
+        user_id: String,
+        org_id: String,
+        token: String,
+    },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
 }
@@ -208,6 +214,15 @@ impl From<Credentials> for zc::Credentials {
                 tokens: tokens.into(),
             },
             Credentials::Dev { user_id, org_id } => zc::Credentials::Dev { user_id, org_id },
+            Credentials::Token {
+                user_id,
+                org_id,
+                token,
+            } => zc::Credentials::Token {
+                user_id,
+                org_id,
+                token,
+            },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
         }
     }
